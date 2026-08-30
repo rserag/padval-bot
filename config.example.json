@@ -1,0 +1,94 @@
+{
+  "title": "HOMELAB STATUS",
+  "telegram": {
+    "token_file": "/etc/padval-bot/telegram-token",
+    "allowed_chat_id_file": "/var/lib/padval-bot/allowed_chat_id",
+    "pairing_secret_file": "/etc/padval-bot/pairing-secret",
+    "state_dir": "/var/lib/padval-bot"
+  },
+  "network_checks": [
+    {
+      "name": "gateway",
+      "type": "icmp",
+      "host": "192.0.2.1"
+    },
+    {
+      "name": "router SSH",
+      "type": "tcp",
+      "host": "192.0.2.2",
+      "port": 22
+    },
+    {
+      "name": "DNS",
+      "type": "dns",
+      "host": "example.com",
+      "port": 443
+    }
+  ],
+  "routeros": {
+    "enabled": false,
+    "host": "192.0.2.2",
+    "user": "status-reader",
+    "identity_file": "/etc/padval-bot/ssh/router_ed25519",
+    "known_hosts_file": "/etc/padval-bot/ssh/known_hosts",
+    "wireguard_interface": "wg1",
+    "timeout": 10
+  },
+  "hosts": [
+    {
+      "name": "app-vm",
+      "address": "198.51.100.10",
+      "mode": "local",
+      "filesystems": [
+        {"name": "root", "path": "/"}
+      ],
+      "services": ["nginx", "docker"],
+      "docker": {
+        "enabled": true,
+        "expected_stopped": ["old-demo-container"],
+        "expected_dormant_projects": ["old-demo-project"]
+      }
+    },
+    {
+      "name": "storage-vm",
+      "address": "203.0.113.20",
+      "mode": "ssh",
+      "ssh": {
+        "host": "203.0.113.20",
+        "user": "status-reader",
+        "identity_file": "/etc/padval-bot/ssh/storage_ed25519",
+        "known_hosts_file": "/etc/padval-bot/ssh/known_hosts"
+      },
+      "filesystems": [
+        {"name": "root", "path": "/"},
+        {"name": "data", "path": "/srv/data"}
+      ],
+      "services": ["docker", "postgresql", "alloy", "mdmonitor"],
+      "docker": {
+        "enabled": true,
+        "expected_stopped": [],
+        "expected_dormant_projects": []
+      },
+      "raid": {
+        "device": "md0",
+        "required_members": "[UU]",
+        "require_spare": true
+      },
+      "process_memory": [
+        {"name": "download-service", "unit": "download-service"}
+      ],
+      "notes": [
+        "Off-host backups are not configured in this example."
+      ]
+    }
+  ],
+  "http_checks": [
+    {
+      "name": "example app",
+      "url": "https://example.com/health",
+      "healthy_status_min": 200,
+      "healthy_status_max": 399,
+      "timeout": 8
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+[Unit]
+Description=Padval Telegram on-demand status bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=padval-bot
+Group=padval-bot
+ExecStart=/opt/padval-bot/venv/bin/padval-bot --config /etc/padval-bot/config.json
+Restart=on-failure
+RestartSec=10s
+StateDirectory=padval-bot
+StateDirectoryMode=0700
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/padval-bot
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+LimitCORE=0
+MemoryHigh=96M
+MemoryMax=128M
+TasksMax=64
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

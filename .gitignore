@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.coverage
+.pytest_cache/
+.ruff_cache/
+.venv/
+build/
+dist/
+
+# Never commit live configuration or credentials.
+config.json
+*.token
+*.secret
+*.pem
+*.key
+allowed_chat_id
+telegram_offset
