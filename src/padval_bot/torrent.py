@@ -11,7 +11,7 @@ import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -34,11 +34,22 @@ class SaveLocation:
 
 
 @dataclass(frozen=True, slots=True)
+class TorrentTrackingSettings:
+    enabled: bool = False
+    poll_interval_seconds: int = 25
+    auto_track_new: bool = True
+    notify_on_complete: bool = True
+    import_incomplete_tagged_on_start: bool = True
+    completed_retention_hours: int = 72
+
+
+@dataclass(frozen=True, slots=True)
 class TorrentLocations:
     save_locations: tuple[SaveLocation, ...]
     custom_enabled: bool
     allowed_roots: tuple[str, ...]
     pending_ttl_seconds: int
+    tracking: TorrentTrackingSettings = field(default_factory=TorrentTrackingSettings)
 
     def by_id(self, location_id: str) -> SaveLocation | None:
         return next(
@@ -50,6 +61,27 @@ class TorrentLocations:
 class Magnet:
     value: str
     display_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class TorrentSnapshot:
+    qbit_hash: str
+    name: str
+    progress: float
+    state: str
+    download_speed: int
+    eta: int
+    amount_left: int
+    size: int
+    completion_on: int
+    save_path: str
+    tags: frozenset[str]
+
+    @property
+    def complete(self) -> bool:
+        return self.completion_on > 0 or (
+            self.size > 0 and self.amount_left == 0 and self.progress >= 1.0
+        )
 
 
 def _canonical_absolute_path(value: object, field: str) -> str:
@@ -143,7 +175,40 @@ def load_locations(path: str) -> TorrentLocations:
     ttl = torrent.get("pending_request_ttl_seconds", 600)
     if not isinstance(ttl, int) or not 60 <= ttl <= 3600:
         raise TorrentError("pending_request_ttl_seconds must be between 60 and 3600")
-    return TorrentLocations(tuple(locations), bool(custom.get("enabled")), roots, ttl)
+    tracking_value = torrent.get("tracking", {})
+    if not isinstance(tracking_value, dict):
+        raise TorrentError("tracking must be an object")
+    boolean_fields = {
+        "enabled": False,
+        "auto_track_new": True,
+        "notify_on_complete": True,
+        "import_incomplete_tagged_on_start": True,
+    }
+    booleans: dict[str, bool] = {}
+    for name, default in boolean_fields.items():
+        item = tracking_value.get(name, default)
+        if not isinstance(item, bool):
+            raise TorrentError(f"tracking.{name} must be boolean")
+        booleans[name] = item
+    poll_interval = tracking_value.get("poll_interval_seconds", 25)
+    if not isinstance(poll_interval, int) or not 10 <= poll_interval <= 300:
+        raise TorrentError("tracking.poll_interval_seconds must be between 10 and 300")
+    retention = tracking_value.get("completed_retention_hours", 72)
+    if not isinstance(retention, int) or not 1 <= retention <= 720:
+        raise TorrentError(
+            "tracking.completed_retention_hours must be between 1 and 720"
+        )
+    tracking = TorrentTrackingSettings(
+        enabled=booleans["enabled"],
+        poll_interval_seconds=poll_interval,
+        auto_track_new=booleans["auto_track_new"],
+        notify_on_complete=booleans["notify_on_complete"],
+        import_incomplete_tagged_on_start=booleans["import_incomplete_tagged_on_start"],
+        completed_retention_hours=retention,
+    )
+    return TorrentLocations(
+        tuple(locations), bool(custom.get("enabled")), roots, ttl, tracking
+    )
 
 
 def validate_magnet(value: str) -> Magnet:
@@ -210,6 +275,8 @@ print(json.dumps(result, separators=(",", ":")))
 
 
 class TorrentService:
+    MAX_API_RESPONSE_BYTES = 2 * 1024 * 1024
+
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
         self.locations = load_locations(config["locations_file"])
@@ -296,6 +363,125 @@ class TorrentService:
             self.check_path(location.path)
 
     @staticmethod
+    def _validate_tag(tag: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", tag):
+            raise TorrentError("qBittorrent tag is invalid")
+        return tag
+
+    @staticmethod
+    def _snapshot(row: object) -> TorrentSnapshot:
+        if not isinstance(row, dict):
+            raise TorrentError("qBittorrent returned invalid torrent data")
+        qbit_hash = row.get("hash")
+        if not isinstance(qbit_hash, str) or not re.fullmatch(
+            r"[0-9A-Fa-f]{40,64}", qbit_hash
+        ):
+            raise TorrentError("qBittorrent returned an invalid torrent hash")
+
+        def integer(name: str) -> int:
+            value = row.get(name, 0)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TorrentError("qBittorrent returned invalid torrent data")
+            return max(0, int(value))
+
+        progress = row.get("progress", 0.0)
+        if isinstance(progress, bool) or not isinstance(progress, (int, float)):
+            raise TorrentError("qBittorrent returned invalid torrent data")
+        name = row.get("name", "Unnamed torrent")
+        state = row.get("state", "unknown")
+        save_path = row.get("save_path", "")
+        tags_value = row.get("tags", "")
+        if not all(
+            isinstance(item, str) for item in (name, state, save_path, tags_value)
+        ):
+            raise TorrentError("qBittorrent returned invalid torrent data")
+        tags = frozenset(item.strip() for item in tags_value.split(",") if item.strip())
+        return TorrentSnapshot(
+            qbit_hash=qbit_hash.lower(),
+            name=name[:512],
+            progress=min(1.0, max(0.0, float(progress))),
+            state=state[:64],
+            download_speed=integer("dlspeed"),
+            eta=integer("eta"),
+            amount_left=integer("amount_left"),
+            size=integer("size"),
+            completion_on=integer("completion_on"),
+            save_path=save_path[:4096],
+            tags=tags,
+        )
+
+    def _json_get(self, path: str, parameters: dict[str, str]) -> object:
+        query = urllib.parse.urlencode(parameters)
+        request = urllib.request.Request(
+            self.base_url + path + ("?" + query if query else ""),
+            headers={"User-Agent": "Padval-Bot/1"},
+        )
+        try:
+            # The origin and path are fixed by validated configuration and source.
+            with urllib.request.urlopen(request, timeout=12) as response:  # nosec B310
+                payload = response.read(self.MAX_API_RESPONSE_BYTES + 1)
+        except (TimeoutError, urllib.error.URLError) as exc:
+            raise TorrentError(
+                "Could not read download progress from qBittorrent."
+            ) from exc
+        if len(payload) > self.MAX_API_RESPONSE_BYTES:
+            raise TorrentError("qBittorrent progress response is too large.")
+        try:
+            return json.loads(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise TorrentError("qBittorrent returned invalid progress data.") from exc
+
+    def list_torrents(
+        self, *, tag: str | None = None, hashes: tuple[str, ...] = ()
+    ) -> tuple[TorrentSnapshot, ...]:
+        parameters: dict[str, str] = {}
+        if tag is not None:
+            parameters["tag"] = self._validate_tag(tag)
+        if hashes:
+            normalized: list[str] = []
+            for value in hashes:
+                if not re.fullmatch(r"[0-9A-Fa-f]{40,64}", value):
+                    raise TorrentError("torrent hash is invalid")
+                normalized.append(value.lower())
+            parameters["hashes"] = "|".join(normalized)
+        payload = self._json_get("/api/v2/torrents/info", parameters)
+        if not isinstance(payload, list) or len(payload) > 1000:
+            raise TorrentError("qBittorrent returned invalid progress data.")
+        return tuple(self._snapshot(row) for row in payload)
+
+    def remove_tag(self, qbit_hash: str, tag: str) -> None:
+        if not re.fullmatch(r"[0-9A-Fa-f]{40,64}", qbit_hash):
+            raise TorrentError("torrent hash is invalid")
+        tag = self._validate_tag(tag)
+        body = urllib.parse.urlencode(
+            {"hashes": qbit_hash.lower(), "tags": tag}
+        ).encode("ascii")
+        request = urllib.request.Request(
+            self.base_url + "/api/v2/torrents/removeTags",
+            data=body,
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": "Padval-Bot/1",
+            },
+            method="POST",
+        )
+        try:
+            # The origin and endpoint are fixed; only validated hash/tag values vary.
+            with urllib.request.urlopen(request, timeout=12) as response:  # nosec B310
+                response.read(128)
+                if response.status != 200:
+                    raise TorrentError("qBittorrent could not remove a tracking tag.")
+        except (TimeoutError, urllib.error.URLError) as exc:
+            raise TorrentError("qBittorrent could not remove a tracking tag.") from exc
+
+    def destination_label(self, save_path: str) -> str:
+        location = next(
+            (item for item in self.locations.save_locations if item.path == save_path),
+            None,
+        )
+        return location.label if location is not None else "Custom"
+
+    @staticmethod
     def _multipart(fields: dict[str, str]) -> tuple[bytes, str]:
         boundary = "----------------padvalbot" + secrets.token_hex(12)
         chunks: list[bytes] = []
@@ -313,13 +499,18 @@ class TorrentService:
         chunks.append(f"--{boundary}--\r\n".encode("ascii"))
         return b"".join(chunks), boundary
 
-    def submit(self, magnet: Magnet, save_path: str) -> None:
+    def submit(
+        self, magnet: Magnet, save_path: str, *, tracking_tag: str | None = None
+    ) -> None:
         self.check_path(save_path)
+        tags = [self.tag]
+        if tracking_tag is not None:
+            tags.append(self._validate_tag(tracking_tag))
         body, boundary = self._multipart(
             {
                 "urls": magnet.value,
                 "savepath": save_path,
-                "tags": self.tag,
+                "tags": ",".join(tags),
                 "autoTMM": "false",
             }
         )

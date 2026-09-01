@@ -118,6 +118,12 @@ memory and expire automatically. Common copied magnets with literal spaces in
 their display name are normalized automatically; matching single or double
 quotes around the complete magnet are also accepted.
 
+When tracking is enabled in the same YAML file, new bot-added torrents are
+watched automatically. `/downloads` shows progress, speed, ETA, state, and
+destination. Each download has a notification toggle, and the bot sends one
+durable completion notification even when completion happens across a bot
+restart. Tracking state contains no magnet or tracker URL.
+
 ## License
 
 No license has been selected yet. Public visibility does not grant permission
