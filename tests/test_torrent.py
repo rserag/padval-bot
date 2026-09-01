@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from unittest import mock
 
@@ -26,6 +27,13 @@ torrent:
     allowed_roots:
       - /mnt/raid1/jellyfin/media
   pending_request_ttl_seconds: 600
+  tracking:
+    enabled: true
+    poll_interval_seconds: 25
+    auto_track_new: true
+    notify_on_complete: true
+    import_incomplete_tagged_on_start: true
+    completed_retention_hours: 72
 """
 
 
@@ -41,6 +49,14 @@ class Response:
     def read(self, limit):
         del limit
         return b"Ok."
+
+
+class JsonResponse(Response):
+    def __init__(self, payload):
+        self.payload = json.dumps(payload).encode("utf-8")
+
+    def read(self, limit):
+        return self.payload[:limit]
 
 
 class TorrentTests(unittest.TestCase):
@@ -72,6 +88,8 @@ class TorrentTests(unittest.TestCase):
         )
         self.assertEqual(locations.allowed_roots, ("/mnt/raid1/jellyfin/media",))
         self.assertEqual(locations.pending_ttl_seconds, 600)
+        self.assertTrue(locations.tracking.enabled)
+        self.assertEqual(locations.tracking.poll_interval_seconds, 25)
 
     def test_rejects_broad_custom_root(self):
         self.locations_path.write_text(
@@ -136,13 +154,45 @@ class TorrentTests(unittest.TestCase):
             "&dn=Example Movie"
         )
         with mock.patch("urllib.request.urlopen", return_value=Response()) as urlopen:
-            service.submit(magnet, "/mnt/raid1/jellyfin/media/movies")
+            service.submit(
+                magnet,
+                "/mnt/raid1/jellyfin/media/movies",
+                tracking_tag="padval-track-1234abcd",
+            )
         request = urlopen.call_args.args[0]
         self.assertEqual(request.full_url, "http://192.0.2.20:8080/api/v2/torrents/add")
         self.assertIn(b"/mnt/raid1/jellyfin/media/movies", request.data)
         self.assertIn(b"dn=Example%20Movie", request.data)
         self.assertIn(b"padval-bot", request.data)
+        self.assertIn(b"padval-track-1234abcd", request.data)
         service.check_path.assert_called_once_with("/mnt/raid1/jellyfin/media/movies")
+
+    def test_lists_tagged_torrent_progress(self):
+        service = self.service()
+        payload = [
+            {
+                "hash": "0123456789abcdef0123456789abcdef01234567",
+                "name": "Example Movie",
+                "progress": 0.75,
+                "state": "downloading",
+                "dlspeed": 1048576,
+                "eta": 120,
+                "amount_left": 25,
+                "size": 100,
+                "completion_on": 0,
+                "save_path": "/mnt/raid1/jellyfin/media/movies",
+                "tags": "padval-bot,padval-track-1234abcd",
+            }
+        ]
+        with mock.patch(
+            "urllib.request.urlopen", return_value=JsonResponse(payload)
+        ) as urlopen:
+            snapshots = service.list_torrents(tag="padval-bot")
+        self.assertEqual(len(snapshots), 1)
+        self.assertEqual(snapshots[0].progress, 0.75)
+        self.assertEqual(snapshots[0].download_speed, 1048576)
+        self.assertIn("padval-track-1234abcd", snapshots[0].tags)
+        self.assertIn("tag=padval-bot", urlopen.call_args.args[0].full_url)
 
 
 if __name__ == "__main__":

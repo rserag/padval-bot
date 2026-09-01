@@ -4,11 +4,17 @@ import unittest
 from pathlib import Path
 
 from padval_bot.telegram import TelegramBot
-from padval_bot.torrent import Magnet, SaveLocation, TorrentLocations
+from padval_bot.torrent import (
+    Magnet,
+    SaveLocation,
+    TorrentLocations,
+    TorrentSnapshot,
+    TorrentTrackingSettings,
+)
 
 
 class FakeTorrentService:
-    def __init__(self):
+    def __init__(self, *, tracking=False):
         self.locations = TorrentLocations(
             (
                 SaveLocation("movies", "Movies", "/mnt/raid1/jellyfin/media/movies"),
@@ -17,8 +23,12 @@ class FakeTorrentService:
             True,
             ("/mnt/raid1/jellyfin/media",),
             600,
+            TorrentTrackingSettings(enabled=tracking),
         )
         self.submissions = []
+        self.snapshots = ()
+        self.tag = "padval-bot"
+        self.removed_tags = []
 
     def validate_magnet(self, value):
         if not value.startswith("magnet:?"):
@@ -30,8 +40,19 @@ class FakeTorrentService:
             raise ValueError("outside")
         return value
 
-    def submit(self, magnet, path):
+    def submit(self, magnet, path, *, tracking_tag=None):
         self.submissions.append((magnet.value, path))
+        self.tracking_tag = tracking_tag
+
+    def list_torrents(self, *, tag=None, hashes=()):
+        del tag, hashes
+        return self.snapshots
+
+    def destination_label(self, path):
+        return "Movies" if path.endswith("/movies") else "Custom"
+
+    def remove_tag(self, qbit_hash, tag):
+        self.removed_tags.append((qbit_hash, tag))
 
 
 class TelegramAuthorizationTests(unittest.TestCase):
@@ -183,3 +204,68 @@ class TelegramAuthorizationTests(unittest.TestCase):
             }
         )
         self.assertEqual(service.submissions[0][1], "/mnt/raid1/jellyfin/media/anime")
+
+    def test_download_progress_and_completion_notification(self):
+        self.chat.write_text("42\n", encoding="ascii")
+        service = FakeTorrentService(tracking=True)
+        active = TorrentSnapshot(
+            qbit_hash="0123456789abcdef0123456789abcdef01234567",
+            name="Example Movie",
+            progress=0.5,
+            state="downloading",
+            download_speed=1048576,
+            eta=120,
+            amount_left=50,
+            size=100,
+            completion_on=0,
+            save_path="/mnt/raid1/jellyfin/media/movies",
+            tags=frozenset({"padval-bot"}),
+        )
+        service.snapshots = (active,)
+        bot = TelegramBot(
+            self.bot.config,
+            lambda: "ok",
+            service,
+            wall_clock=lambda: 100,
+        )
+        calls = []
+        bot.api = lambda method, **params: calls.append((method, params)) or {
+            "ok": True,
+            "result": {"message_id": len(calls)},
+        }
+        bot.handle_update(
+            {
+                "message": {
+                    "message_id": 1,
+                    "text": "/downloads",
+                    "chat": {"id": 42, "type": "private"},
+                }
+            }
+        )
+        self.assertIn("50.0%", calls[-1][1]["text"])
+        self.assertIn("Example Movie", calls[-1][1]["text"])
+
+        bot._poll_tracking()
+        service.snapshots = (
+            TorrentSnapshot(
+                qbit_hash=active.qbit_hash,
+                name=active.name,
+                progress=1.0,
+                state="uploading",
+                download_speed=0,
+                eta=0,
+                amount_left=0,
+                size=100,
+                completion_on=200,
+                save_path=active.save_path,
+                tags=active.tags,
+            ),
+        )
+        bot._poll_tracking()
+        bot._poll_tracking()
+        completion_messages = [
+            params["text"]
+            for method, params in calls
+            if method == "sendMessage" and "Download complete" in params["text"]
+        ]
+        self.assertEqual(len(completion_messages), 1)
