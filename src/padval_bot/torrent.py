@@ -148,12 +148,28 @@ def load_locations(path: str) -> TorrentLocations:
 
 def validate_magnet(value: str) -> Magnet:
     value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1].strip()
+    elif value.startswith(("'", '"')) or value.endswith(("'", '"')):
+        raise TorrentError("Send one valid magnet link.")
     if (
         not value
         or len(value) > 8192
-        or any(character.isspace() for character in value)
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
     ):
-        raise TorrentError("Send one valid magnet link without spaces.")
+        raise TorrentError("Send one valid magnet link.")
+    prefix, separator, query = value.partition("?")
+    if prefix.lower() != "magnet:" or not separator or not query:
+        raise TorrentError("Only magnet links are supported.")
+    if re.search(r"%(?![0-9A-Fa-f]{2})", query):
+        raise TorrentError("Send one valid magnet link.")
+    normalized_query = urllib.parse.quote(
+        query,
+        safe="!$&'()*+,-./:;=?@_~%[]",
+    )
+    value = "magnet:?" + normalized_query
+    if len(value) > 8192:
+        raise TorrentError("Send one valid magnet link.")
     parsed = urllib.parse.urlsplit(value)
     if parsed.scheme.lower() != "magnet" or not parsed.query:
         raise TorrentError("Only magnet links are supported.")

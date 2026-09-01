@@ -93,6 +93,32 @@ class TorrentTests(unittest.TestCase):
             validate_magnet(private_value)
         self.assertNotIn("private-passkey", str(raised.exception))
 
+    def test_normalizes_literal_spaces_in_magnet_display_name(self):
+        magnet = validate_magnet(
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
+            "&dn=Example Movie (2004)&tr=udp://tracker.example/announce"
+        )
+        self.assertIn("dn=Example%20Movie%20(2004)", magnet.value)
+        self.assertNotIn(" ", magnet.value)
+        self.assertEqual(
+            magnet.display_hash, "0123456789ABCDEF0123456789ABCDEF01234567"
+        )
+
+    def test_accepts_optional_quotes_around_magnet(self):
+        magnet = validate_magnet(
+            '"magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567'
+            '&dn=Quoted Movie"'
+        )
+        self.assertIn("dn=Quoted%20Movie", magnet.value)
+        self.assertFalse(magnet.value.startswith('"'))
+
+    def test_rejects_control_characters_and_malformed_percent_escape(self):
+        base = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
+        for value in (base + "\n&dn=Second line", base + "&dn=Bad%value"):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(TorrentError, "valid magnet"):
+                    validate_magnet(value)
+
     def test_custom_path_must_remain_under_allowed_root(self):
         service = self.service()
         self.assertEqual(
@@ -107,12 +133,14 @@ class TorrentTests(unittest.TestCase):
         service.check_path = mock.Mock()
         magnet = validate_magnet(
             "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
+            "&dn=Example Movie"
         )
         with mock.patch("urllib.request.urlopen", return_value=Response()) as urlopen:
             service.submit(magnet, "/mnt/raid1/jellyfin/media/movies")
         request = urlopen.call_args.args[0]
         self.assertEqual(request.full_url, "http://192.0.2.20:8080/api/v2/torrents/add")
         self.assertIn(b"/mnt/raid1/jellyfin/media/movies", request.data)
+        self.assertIn(b"dn=Example%20Movie", request.data)
         self.assertIn(b"padval-bot", request.data)
         service.check_path.assert_called_once_with("/mnt/raid1/jellyfin/media/movies")
 

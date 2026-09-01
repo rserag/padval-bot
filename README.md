@@ -114,7 +114,9 @@ the paired private chat. The bot presents the destinations from
 `config/torrent-locations.yaml`, plus Custom and Cancel controls. A custom path
 must already exist, resolve below one of the configured roots, and be writable
 by the qBittorrent service account. Pending magnets remain only in process
-memory and expire automatically.
+memory and expire automatically. Common copied magnets with literal spaces in
+their display name are normalized automatically; matching single or double
+quotes around the complete magnet are also accepted.
 
 ## License
 
