@@ -1,0 +1,43 @@
+[Unit]
+Description=Padval Telegram on-demand status and torrent bot
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=c
+Group=c
+SupplementaryGroups=docker
+WorkingDirectory=/opt/padval-status-bot/current
+Environment=PYTHONPATH=/opt/padval-status-bot/current/src
+ExecStart=/usr/bin/python3 -m padval_bot --config /etc/padval-status-bot/config.json
+Restart=on-failure
+RestartSec=10s
+StateDirectory=padval-status-bot
+StateDirectoryMode=0700
+
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=read-only
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/padval-status-bot
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+LimitCORE=0
+MemoryHigh=96M
+MemoryMax=128M
+TasksMax=64
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

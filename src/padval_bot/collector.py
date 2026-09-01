@@ -6,16 +6,13 @@ import base64
 import datetime as dt
 import html
 import json
-import os
 import shlex
-import shutil
 import socket
 import subprocess
-from pathlib import Path
 from typing import Any
 
 
-HOST_PROBE = r'''
+HOST_PROBE = r"""
 import json
 import os
 import shutil
@@ -122,10 +119,12 @@ if raid:
         pass
 
 print(json.dumps(result, separators=(",", ":")))
-'''
+"""
 
 
-def run(args: list[str], timeout: int = 10, input_text: str | None = None) -> tuple[int, str]:
+def run(
+    args: list[str], timeout: int = 10, input_text: str | None = None
+) -> tuple[int, str]:
     try:
         process = subprocess.run(
             args,
@@ -168,11 +167,16 @@ def _probe_command(host: dict[str, Any]) -> list[str]:
     remote = f"python3 -c {shlex.quote(python_code)}"
     return [
         "ssh",
-        "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=5",
-        "-o", "StrictHostKeyChecking=yes",
-        "-o", f"UserKnownHostsFile={ssh['known_hosts_file']}",
-        "-i", ssh["identity_file"],
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"UserKnownHostsFile={ssh['known_hosts_file']}",
+        "-i",
+        ssh["identity_file"],
         destination,
         remote,
     ]
@@ -238,17 +242,26 @@ def collect_http(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         maximum = int(check.get("healthy_status_max", 499))
         rc, value = run(
             [
-                "curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}",
-                "--max-time", str(int(check.get("timeout", 8))), check["url"],
+                "curl",
+                "-sS",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "--max-time",
+                str(int(check.get("timeout", 8))),
+                check["url"],
             ],
             timeout=int(check.get("timeout", 8)) + 2,
         )
         status = int(value) if rc == 0 and value.isdigit() else None
-        results.append({
-            **check,
-            "status": status,
-            "healthy": status is not None and minimum <= status <= maximum,
-        })
+        results.append(
+            {
+                **check,
+                "status": status,
+                "healthy": status is not None and minimum <= status <= maximum,
+            }
+        )
     return results
 
 
@@ -266,11 +279,19 @@ def collect_routeros(config: dict[str, Any] | None) -> dict[str, Any] | None:
     )
     rc, output = run(
         [
-            "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5",
-            "-o", "StrictHostKeyChecking=yes",
-            "-o", f"UserKnownHostsFile={config['known_hosts_file']}",
-            "-i", config["identity_file"],
-            f"{config['user']}@{config['host']}", command,
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=5",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            f"UserKnownHostsFile={config['known_hosts_file']}",
+            "-i",
+            config["identity_file"],
+            f"{config['user']}@{config['host']}",
+            command,
         ],
         timeout=int(config.get("timeout", 10)),
     )
@@ -297,7 +318,11 @@ def collect_snapshot(config: dict[str, Any]) -> dict[str, Any]:
 def _host_issues(host: dict[str, Any]) -> list[str]:
     if not host.get("reachable"):
         return [f"{host['name']} unreachable"]
-    issues = [f"{host['name']} {unit} inactive" for unit, ok in host.get("services", {}).items() if not ok]
+    issues = [
+        f"{host['name']} {unit} inactive"
+        for unit, ok in host.get("services", {}).items()
+        if not ok
+    ]
     expected_stopped = set(host.get("expected_stopped", []))
     for row in host.get("containers", []):
         parts = str(row).split("|", 2)
@@ -348,11 +373,21 @@ def render_report(snapshot: dict[str, Any], title: str = "SYSTEM STATUS") -> str
         issues.extend(_host_issues(host))
     for item in snapshot.get("http", []):
         if not item["healthy"]:
-            issues.append(f"{item['name']} returned {item.get('status') or 'no response'}")
+            issues.append(
+                f"{item['name']} returned {item.get('status') or 'no response'}"
+            )
 
     generated = snapshot.get("generated_at")
-    stamp = generated.strftime("%Y-%m-%d %H:%M %Z") if hasattr(generated, "strftime") else str(generated)
-    overall = "All monitored systems healthy" if not issues else f"{len(issues)} issue{'s' if len(issues) != 1 else ''} detected"
+    stamp = (
+        generated.strftime("%Y-%m-%d %H:%M %Z")
+        if hasattr(generated, "strftime")
+        else str(generated)
+    )
+    overall = (
+        "All monitored systems healthy"
+        if not issues
+        else f"{len(issues)} issue{'s' if len(issues) != 1 else ''} detected"
+    )
     lines = [
         f"{'🟢' if not issues else '🟠'} <b>{html.escape(title)}</b>",
         f"<b>{html.escape(overall)}</b>",
@@ -362,7 +397,12 @@ def render_report(snapshot: dict[str, Any], title: str = "SYSTEM STATUS") -> str
     network = snapshot.get("network", [])
     if network:
         lines.extend(["", "<b>NETWORK</b>"])
-        lines.append("  ".join(f"{'✅' if x['healthy'] else '❌'} {html.escape(str(x['name']))}" for x in network))
+        lines.append(
+            "  ".join(
+                f"{'✅' if x['healthy'] else '❌'} {html.escape(str(x['name']))}"
+                for x in network
+            )
+        )
     if router and router.get("healthy"):
         lines.append(
             f"RouterOS <b>{html.escape(str(router.get('version', '?')))}</b> · "
@@ -372,10 +412,12 @@ def render_report(snapshot: dict[str, Any], title: str = "SYSTEM STATUS") -> str
         )
 
     for host in snapshot.get("hosts", []):
-        lines.extend([
-            "",
-            f"<b>{html.escape(str(host['name']).upper())}</b>  <code>{html.escape(str(host.get('address', '?')))}</code>",
-        ])
+        lines.extend(
+            [
+                "",
+                f"<b>{html.escape(str(host['name']).upper())}</b>  <code>{html.escape(str(host.get('address', '?')))}</code>",
+            ]
+        )
         if not host.get("reachable"):
             lines.append("❌ Host unreachable")
             continue
@@ -399,9 +441,16 @@ def render_report(snapshot: dict[str, Any], title: str = "SYSTEM STATUS") -> str
         projects = host.get("compose_projects", [])
         if projects:
             dormant = set(host.get("expected_dormant_projects", []))
-            monitored = [project for project in projects if project.get("Name") not in dormant]
-            dormant_present = [project for project in projects if project.get("Name") in dormant]
-            active = sum(str(project.get("Status", "")).startswith("running") for project in monitored)
+            monitored = [
+                project for project in projects if project.get("Name") not in dormant
+            ]
+            dormant_present = [
+                project for project in projects if project.get("Name") in dormant
+            ]
+            active = sum(
+                str(project.get("Status", "")).startswith("running")
+                for project in monitored
+            )
             lines.append(
                 f"{'✅' if active == len(monitored) else '❌'} Apps  <b>{active}/{len(monitored)} active</b>"
             )
@@ -412,9 +461,15 @@ def render_report(snapshot: dict[str, Any], title: str = "SYSTEM STATUS") -> str
         containers = host.get("containers", [])
         if containers:
             expected_stopped = set(host.get("expected_stopped", []))
-            monitored_rows = [str(row).split("|", 2) for row in containers if str(row).split("|", 1)[0] not in expected_stopped]
+            monitored_rows = [
+                str(row).split("|", 2)
+                for row in containers
+                if str(row).split("|", 1)[0] not in expected_stopped
+            ]
             healthy_containers = sum(
-                len(parts) >= 2 and parts[1] == "running" and (len(parts) < 3 or "unhealthy" not in parts[2].lower())
+                len(parts) >= 2
+                and parts[1] == "running"
+                and (len(parts) < 3 or "unhealthy" not in parts[2].lower())
                 for parts in monitored_rows
             )
             lines.append(
@@ -423,7 +478,11 @@ def render_report(snapshot: dict[str, Any], title: str = "SYSTEM STATUS") -> str
             )
         raid = host.get("raid")
         if raid:
-            spare = " · spare " + ("yes" if raid.get("spare_ok") else "no") if raid.get("spare_ok") is not None else ""
+            spare = (
+                " · spare " + ("yes" if raid.get("spare_ok") else "no")
+                if raid.get("spare_ok") is not None
+                else ""
+            )
             lines.append(
                 f"{'✅' if raid.get('members_ok') and raid.get('spare_ok') is not False and raid.get('mismatch') in (0, None) else '❌'} "
                 f"RAID <b>{html.escape(str(raid.get('device', '?')))}</b> · "
@@ -432,17 +491,21 @@ def render_report(snapshot: dict[str, Any], title: str = "SYSTEM STATUS") -> str
             )
         for name, value in host.get("process_memory", {}).items():
             if isinstance(value, int):
-                lines.append(f"ℹ️ {html.escape(str(name))} memory  <b>{value / (1024 ** 3):.1f} GiB</b>")
+                lines.append(
+                    f"ℹ️ {html.escape(str(name))} memory  <b>{value / (1024**3):.1f} GiB</b>"
+                )
         lines.extend(f"ℹ️ {html.escape(str(note))}" for note in host.get("notes", []))
 
     http = snapshot.get("http", [])
     if http:
         healthy_http = sum(bool(item["healthy"]) for item in http)
-        lines.extend([
-            "",
-            "<b>HTTP</b>",
-            f"{'✅' if healthy_http == len(http) else '❌'} Endpoints  <b>{healthy_http}/{len(http)} responding</b>",
-        ])
+        lines.extend(
+            [
+                "",
+                "<b>HTTP</b>",
+                f"{'✅' if healthy_http == len(http) else '❌'} Endpoints  <b>{healthy_http}/{len(http)} responding</b>",
+            ]
+        )
 
     if issues:
         lines.extend(["", "<b>ATTENTION</b>"])

@@ -4,7 +4,8 @@
     "token_file": "/etc/padval-bot/telegram-token",
     "allowed_chat_id_file": "/var/lib/padval-bot/allowed_chat_id",
     "pairing_secret_file": "/etc/padval-bot/pairing-secret",
-    "state_dir": "/var/lib/padval-bot"
+    "state_dir": "/var/lib/padval-bot",
+    "heartbeat_file": "/var/lib/padval-bot/heartbeat"
   },
   "network_checks": [
     {
@@ -90,5 +91,17 @@
       "healthy_status_max": 399,
       "timeout": 8
     }
-  ]
+  ],
+  "torrent": {
+    "enabled": false,
+    "base_url": "http://203.0.113.20:8080",
+    "locations_file": "/opt/padval-bot/current/config/torrent-locations.yaml",
+    "tag": "padval-bot",
+    "path_check_ssh": {
+      "host": "203.0.113.20",
+      "user": "download-service",
+      "identity_file": "/etc/padval-bot/ssh/storage_ed25519",
+      "known_hosts_file": "/etc/padval-bot/ssh/known_hosts"
+    }
+  }
 }

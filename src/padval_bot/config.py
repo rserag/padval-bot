@@ -37,8 +37,17 @@ def load_config(path: str | Path) -> dict[str, Any]:
         if not value.startswith("/"):
             raise ConfigError(f"config.telegram.{key} must be an absolute path")
     pairing_file = telegram.get("pairing_secret_file")
-    if pairing_file is not None and (not isinstance(pairing_file, str) or not pairing_file.startswith("/")):
-        raise ConfigError("config.telegram.pairing_secret_file must be an absolute path")
+    if pairing_file is not None and (
+        not isinstance(pairing_file, str) or not pairing_file.startswith("/")
+    ):
+        raise ConfigError(
+            "config.telegram.pairing_secret_file must be an absolute path"
+        )
+    heartbeat_file = telegram.get("heartbeat_file")
+    if heartbeat_file is not None and (
+        not isinstance(heartbeat_file, str) or not heartbeat_file.startswith("/")
+    ):
+        raise ConfigError("config.telegram.heartbeat_file must be an absolute path")
 
     network_checks = config.get("network_checks", [])
     if not isinstance(network_checks, list):
@@ -65,8 +74,12 @@ def load_config(path: str | Path) -> dict[str, Any]:
                 if not router[key].startswith("/"):
                     raise ConfigError(f"config.routeros.{key} must be an absolute path")
             interface = router.get("wireguard_interface", "wg1")
-            if not isinstance(interface, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,32}", interface):
-                raise ConfigError("config.routeros.wireguard_interface contains unsafe characters")
+            if not isinstance(interface, str) or not re.fullmatch(
+                r"[A-Za-z0-9_.-]{1,32}", interface
+            ):
+                raise ConfigError(
+                    "config.routeros.wireguard_interface contains unsafe characters"
+                )
 
     hosts = _require(config, "hosts", list, "config")
     if not hosts:
@@ -84,7 +97,9 @@ def load_config(path: str | Path) -> dict[str, Any]:
                 _require(ssh, key, str, f"config.hosts[{index}].ssh")
             for key in ("identity_file", "known_hosts_file"):
                 if not ssh[key].startswith("/"):
-                    raise ConfigError(f"config.hosts[{index}].ssh.{key} must be an absolute path")
+                    raise ConfigError(
+                        f"config.hosts[{index}].ssh.{key} must be an absolute path"
+                    )
 
     checks = config.get("http_checks", [])
     if not isinstance(checks, list):
@@ -96,5 +111,30 @@ def load_config(path: str | Path) -> dict[str, Any]:
         url = _require(check, "url", str, f"config.http_checks[{index}]")
         if not url.startswith(("https://", "http://")):
             raise ConfigError(f"config.http_checks[{index}].url must be HTTP(S)")
+
+    torrent = config.get("torrent")
+    if torrent is not None:
+        if not isinstance(torrent, dict):
+            raise ConfigError("config.torrent must be an object")
+        enabled = torrent.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise ConfigError("config.torrent.enabled must be bool")
+        if enabled:
+            base_url = _require(torrent, "base_url", str, "config.torrent")
+            if not base_url.startswith(("http://", "https://")):
+                raise ConfigError("config.torrent.base_url must be HTTP(S)")
+            locations_file = _require(torrent, "locations_file", str, "config.torrent")
+            if not locations_file.startswith("/"):
+                raise ConfigError(
+                    "config.torrent.locations_file must be an absolute path"
+                )
+            ssh = _require(torrent, "path_check_ssh", dict, "config.torrent")
+            for key in ("host", "user", "identity_file", "known_hosts_file"):
+                _require(ssh, key, str, "config.torrent.path_check_ssh")
+            for key in ("identity_file", "known_hosts_file"):
+                if not ssh[key].startswith("/"):
+                    raise ConfigError(
+                        f"config.torrent.path_check_ssh.{key} must be an absolute path"
+                    )
 
     return config

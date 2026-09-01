@@ -1,0 +1,18 @@
+version: 1
+
+torrent:
+  save_locations:
+    - id: movies
+      label: Movies
+      path: /mnt/raid1/jellyfin/media/movies
+
+    - id: tv
+      label: TV
+      path: /mnt/raid1/jellyfin/media/tv
+
+  custom_paths:
+    enabled: true
+    allowed_roots:
+      - /mnt/raid1/jellyfin/media
+
+  pending_request_ttl_seconds: 600

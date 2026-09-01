@@ -1,12 +1,12 @@
 # Padval Bot
 
-Padval Bot adds a locked-down `/status` command to a Telegram bot that is
-already used by a monitoring system such as Grafana. One command returns one
-compact message covering routers, Linux hosts, systemd services, Docker
-Compose projects, containers, HTTP endpoints, RAID health, storage usage, and
-selected process memory.
+Padval Bot adds locked-down `/status` and optional `/torrent` commands to a
+Telegram bot that is already used by a monitoring system such as Grafana.
+Status returns one compact infrastructure summary. Torrent submission accepts
+one magnet link, asks for a configured destination, and submits it to
+qBittorrent without exposing the magnet in replies or logs.
 
-It uses only the Python standard library and common Linux tools. Grafana can
+It uses Python, PyYAML, and common Linux tools. Grafana can
 continue sending alerts with the same Telegram bot token; Padval Bot only
 consumes incoming commands.
 
@@ -50,6 +50,8 @@ The addresses above are reserved documentation ranges, not a real deployment.
 - Remote probes are read-only and return only health/resource summaries.
 - The example systemd service is unprivileged and hardened.
 - Reports are capped below Telegram's single-message limit.
+- Torrent destinations come from reviewed YAML. Custom paths are contained
+  below explicit application roots and verified on the storage host.
 
 Read [SECURITY.md](SECURITY.md) and [the deployment guide](docs/deployment.md)
 before connecting it to real infrastructure.
@@ -78,7 +80,7 @@ For a persistent installation, follow [docs/deployment.md](docs/deployment.md).
 
 ## Configuration
 
-The JSON file has five main areas:
+The JSON file has six main areas:
 
 - `telegram`: token, authorized-chat, pairing-secret, and runtime-state files.
 - `network_checks`: ICMP, TCP, or DNS checks.
@@ -87,6 +89,8 @@ The JSON file has five main areas:
 - `hosts`: local or SSH Linux probes with filesystems, services, Docker, RAID,
   and selected systemd memory counters.
 - `http_checks`: endpoint-specific healthy HTTP status ranges and timeouts.
+- `torrent`: optional private qBittorrent endpoint and SSH path-check settings.
+  Public destination choices live in `config/torrent-locations.yaml`.
 
 Start from [config.example.json](config.example.json). No live configuration is
 loaded from environment variables or command-line secrets, which keeps tokens
@@ -102,6 +106,15 @@ python3 -m compileall -q src tests
 CI runs those checks on all supported Python versions. Contributions are
 welcome, but do not include real infrastructure details or credentials in
 issues, fixtures, logs, screenshots, or pull requests.
+
+## Torrent workflow
+
+When enabled in the private runtime configuration, send `/torrent <magnet>` in
+the paired private chat. The bot presents the destinations from
+`config/torrent-locations.yaml`, plus Custom and Cancel controls. A custom path
+must already exist, resolve below one of the configured roots, and be writable
+by the qBittorrent service account. Pending magnets remain only in process
+memory and expire automatically.
 
 ## License
 

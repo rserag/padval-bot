@@ -23,8 +23,45 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install
-        run: python -m pip install .
+        run: python -m pip install . ruff==0.12.12
+      - name: Lint and formatting
+        run: |
+          ruff check src tests deploy/padval-bot-deploy
+          ruff format --check src tests deploy/padval-bot-deploy
       - name: Unit tests
         run: python -m unittest discover -s tests -v
       - name: Compile check
         run: python -m compileall -q src tests
+      - name: Deployment syntax checks
+        run: |
+          python -m py_compile deploy/padval-bot-deploy
+          sh -n deploy/padval-bot-deploy-ssh
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install security tools
+        run: |
+          python -m pip install --upgrade pip==26.2.1
+          python -m pip install . bandit==1.8.6 pip-audit==2.9.0
+      - name: Audit dependencies and code
+        run: |
+          pip-audit
+          bandit -q -ll -r src deploy/padval-bot-deploy -x tests
+
+  quality-gate:
+    if: always()
+    needs: [test, security]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every test job
+        run: |
+          test "${{ needs.test.result }}" = "success"
+          test "${{ needs.security.result }}" = "success"

@@ -3,20 +3,40 @@
 from __future__ import annotations
 
 import hmac
+import html
 import json
 import os
 import re
+import secrets
 import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .torrent import Magnet, TorrentError, TorrentService, TorrentSubmissionUncertain
+
+
+@dataclass(slots=True)
+class PendingTorrent:
+    request_id: str
+    magnet: Magnet
+    created_at: float
+    custom_prompt_message_id: int | None = None
+
 
 class TelegramBot:
-    def __init__(self, config: dict[str, Any], status_builder: Callable[[], str]) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any],
+        status_builder: Callable[[], str],
+        torrent_service: TorrentService | None = None,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.config = config
         self.status_builder = status_builder
         token = Path(config["token_file"]).read_text(encoding="ascii").strip()
@@ -27,24 +47,51 @@ class TelegramBot:
         self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.chat_file = Path(config["allowed_chat_id_file"])
         self.offset_file = self.state_dir / "telegram_offset"
+        self.heartbeat_file = (
+            Path(config["heartbeat_file"]) if config.get("heartbeat_file") else None
+        )
+        self.torrent_service = torrent_service
+        self.clock = clock
+        self.pending_torrents: dict[int, PendingTorrent] = {}
 
     def api(self, method: str, **params: object) -> dict[str, Any]:
         body = urllib.parse.urlencode(params).encode("utf-8")
         request = urllib.request.Request(self.base_url + method, data=body)
-        with urllib.request.urlopen(request, timeout=35) as response:
+        # The URL is always the literal Telegram HTTPS origin plus a validated token.
+        with urllib.request.urlopen(request, timeout=35) as response:  # nosec B310
             result = json.load(response)
         if not result.get("ok"):
             raise RuntimeError(f"Telegram API method {method} failed")
         return result
 
-    def send(self, chat_id: int, text: str) -> None:
-        self.api(
+    def send(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> int | None:
+        params: dict[str, object] = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": "true",
+        }
+        if reply_markup is not None:
+            params["reply_markup"] = json.dumps(reply_markup, separators=(",", ":"))
+        if reply_to_message_id is not None:
+            params["reply_parameters"] = json.dumps(
+                {"message_id": reply_to_message_id}, separators=(",", ":")
+            )
+        response = self.api(
             "sendMessage",
-            chat_id=chat_id,
-            text=text,
-            parse_mode="HTML",
-            disable_web_page_preview="true",
+            **params,
         )
+        result = response.get("result")
+        if isinstance(result, dict) and isinstance(result.get("message_id"), int):
+            return int(result["message_id"])
+        return None
 
     @staticmethod
     def read_int(path: Path, default: int = 0) -> int:
@@ -85,17 +132,198 @@ class TelegramBot:
         self.write_int(self.chat_file, chat_id)
         return True
 
+    def _expire_pending(self, chat_id: int) -> PendingTorrent | None:
+        pending = self.pending_torrents.get(chat_id)
+        if pending is None or self.torrent_service is None:
+            return pending
+        if (
+            self.clock() - pending.created_at
+            > self.torrent_service.locations.pending_ttl_seconds
+        ):
+            self.pending_torrents.pop(chat_id, None)
+            return None
+        return pending
+
+    def _torrent_keyboard(self, request_id: str) -> dict[str, Any]:
+        if self.torrent_service is None:
+            raise RuntimeError("torrent service is unavailable")
+        buttons = [
+            {
+                "text": location.label,
+                "callback_data": f"torrent:{request_id}:{location.id}",
+            }
+            for location in self.torrent_service.locations.save_locations
+        ]
+        if self.torrent_service.locations.custom_enabled:
+            buttons.append(
+                {"text": "Custom", "callback_data": f"torrent:{request_id}:custom"}
+            )
+        buttons.append(
+            {"text": "Cancel", "callback_data": f"torrent:{request_id}:cancel"}
+        )
+        rows = [buttons[index : index + 2] for index in range(0, len(buttons), 2)]
+        return {"inline_keyboard": rows}
+
+    def _start_torrent(self, chat_id: int, argument: str) -> None:
+        if self.torrent_service is None:
+            self.send(chat_id, "Torrent submission is not configured.")
+            return
+        if not argument:
+            self.send(chat_id, "Usage: <code>/torrent magnet:?xt=...</code>")
+            return
+        try:
+            magnet = self.torrent_service.validate_magnet(argument)
+        except TorrentError as exc:
+            self.send(chat_id, html.escape(str(exc)))
+            return
+        request_id = secrets.token_hex(4)
+        self.pending_torrents[chat_id] = PendingTorrent(
+            request_id, magnet, self.clock()
+        )
+        self.send(
+            chat_id,
+            "Where should this torrent be saved?",
+            reply_markup=self._torrent_keyboard(request_id),
+        )
+
+    def _submit_torrent(
+        self, chat_id: int, pending: PendingTorrent, save_path: str
+    ) -> None:
+        if self.torrent_service is None:
+            raise RuntimeError("torrent service is unavailable")
+        self.pending_torrents.pop(chat_id, None)
+        try:
+            self.api("sendChatAction", chat_id=chat_id, action="typing")
+            self.torrent_service.submit(pending.magnet, save_path)
+        except TorrentSubmissionUncertain as exc:
+            self.send(chat_id, "⚠️ " + html.escape(str(exc)))
+            return
+        except TorrentError as exc:
+            self.send(chat_id, "❌ " + html.escape(str(exc)))
+            return
+        display_hash = pending.magnet.display_hash
+        shortened = (
+            display_hash
+            if len(display_hash) <= 16
+            else f"{display_hash[:8]}…{display_hash[-8:]}"
+        )
+        self.send(
+            chat_id,
+            "✅ Added to qBittorrent\n"
+            f"Destination: <code>{html.escape(save_path)}</code>\n"
+            f"Info hash: <code>{html.escape(shortened)}</code>",
+        )
+
+    def _handle_callback(self, callback: dict[str, Any]) -> None:
+        callback_id = callback.get("id")
+        data = callback.get("data")
+        message = callback.get("message")
+        if (
+            not isinstance(callback_id, str)
+            or not isinstance(data, str)
+            or not isinstance(message, dict)
+        ):
+            return
+        chat = message.get("chat")
+        if not isinstance(chat, dict) or not self.authorize(chat, []):
+            return
+        chat_id = int(chat["id"])
+        parts = data.split(":", 2)
+        pending = self._expire_pending(chat_id)
+        if (
+            len(parts) != 3
+            or parts[0] != "torrent"
+            or pending is None
+            or pending.request_id != parts[1]
+        ):
+            self.api(
+                "answerCallbackQuery",
+                callback_query_id=callback_id,
+                text="Request expired",
+            )
+            return
+        choice = parts[2]
+        if choice == "cancel":
+            self.pending_torrents.pop(chat_id, None)
+            self.api(
+                "answerCallbackQuery", callback_query_id=callback_id, text="Cancelled"
+            )
+            self.send(chat_id, "Torrent request cancelled.")
+            return
+        if choice == "custom":
+            self.api("answerCallbackQuery", callback_query_id=callback_id)
+            prompt_id = self.send(
+                chat_id,
+                "Reply with an existing directory below an allowed media folder.",
+                reply_markup={
+                    "force_reply": True,
+                    "selective": True,
+                    "input_field_placeholder": "/mnt/raid1/jellyfin/media/…",
+                },
+            )
+            pending.custom_prompt_message_id = prompt_id
+            return
+        if self.torrent_service is None:
+            raise RuntimeError("torrent service is unavailable")
+        location = self.torrent_service.locations.by_id(choice)
+        if location is None:
+            self.api(
+                "answerCallbackQuery",
+                callback_query_id=callback_id,
+                text="Unknown destination",
+            )
+            return
+        self.api(
+            "answerCallbackQuery",
+            callback_query_id=callback_id,
+            text=f"Adding to {location.label}",
+        )
+        self._submit_torrent(chat_id, pending, location.path)
+
+    def _handle_custom_path(
+        self, message: dict[str, Any], chat: dict[str, Any], text: str
+    ) -> bool:
+        if self.torrent_service is None or not self.authorize(chat, []):
+            return False
+        chat_id = int(chat["id"])
+        pending = self._expire_pending(chat_id)
+        reply = message.get("reply_to_message")
+        if (
+            pending is None
+            or pending.custom_prompt_message_id is None
+            or not isinstance(reply, dict)
+            or reply.get("message_id") != pending.custom_prompt_message_id
+        ):
+            return False
+        try:
+            save_path = self.torrent_service.validate_custom_path(text)
+        except TorrentError as exc:
+            self.pending_torrents.pop(chat_id, None)
+            self.send(chat_id, "❌ " + html.escape(str(exc)))
+            return True
+        self._submit_torrent(chat_id, pending, save_path)
+        return True
+
     def handle_update(self, update: dict[str, Any]) -> None:
+        callback = update.get("callback_query")
+        if isinstance(callback, dict):
+            self._handle_callback(callback)
+            return
         message = update.get("message")
         if not isinstance(message, dict):
             return
         text = message.get("text")
         chat = message.get("chat")
-        if not isinstance(text, str) or not isinstance(chat, dict) or not text.startswith("/"):
+        if not isinstance(text, str) or not isinstance(chat, dict):
             return
-        parts = text.strip().split()
-        command = parts[0].split("@", 1)[0].lower()
-        if not self.authorize(chat, parts[1:]):
+        if self._handle_custom_path(message, chat, text.strip()):
+            return
+        if not text.startswith("/"):
+            return
+        command_text, separator, argument = text.strip().partition(" ")
+        command = command_text.split("@", 1)[0].lower()
+        authorization_arguments = argument.split() if separator else []
+        if not self.authorize(chat, authorization_arguments):
             return
         chat_id = int(chat["id"])
         if command == "/status":
@@ -103,22 +331,56 @@ class TelegramBot:
                 self.api("sendChatAction", chat_id=chat_id, action="typing")
                 self.send(chat_id, self.status_builder())
             except Exception:
-                self.send(chat_id, "Status collection failed. Check the service journal.")
+                self.send(
+                    chat_id, "Status collection failed. Check the service journal."
+                )
+        elif command == "/torrent":
+            self._start_torrent(chat_id, argument if separator else "")
+        elif command == "/cancel":
+            if self.pending_torrents.pop(chat_id, None) is not None:
+                self.send(chat_id, "Torrent request cancelled.")
+            else:
+                self.send(chat_id, "There is no pending torrent request.")
         elif command in {"/start", "/help"}:
-            self.send(chat_id, "Send /status for one live infrastructure summary.")
+            commands = "Send /status for one live infrastructure summary."
+            if self.torrent_service is not None:
+                commands += (
+                    "\nSend <code>/torrent &lt;magnet&gt;</code> to add a torrent."
+                )
+            self.send(chat_id, commands)
 
     def run_forever(self) -> None:
+        commands = [
+            {"command": "status", "description": "Full infrastructure status"},
+        ]
+        if self.torrent_service is not None:
+            commands.extend(
+                [
+                    {"command": "torrent", "description": "Add a qBittorrent magnet"},
+                    {
+                        "command": "cancel",
+                        "description": "Cancel a pending torrent request",
+                    },
+                ]
+            )
+        commands.append({"command": "help", "description": "Show available commands"})
         self.api(
             "setMyCommands",
-            commands=json.dumps([
-                {"command": "status", "description": "Full infrastructure status"},
-                {"command": "help", "description": "Show available commands"},
-            ]),
+            commands=json.dumps(commands),
         )
+        if self.heartbeat_file is not None:
+            self.heartbeat_file.touch()
         offset = self.read_int(self.offset_file)
         while True:
             try:
-                result = self.api("getUpdates", offset=offset, timeout=25, allowed_updates='["message"]')
+                result = self.api(
+                    "getUpdates",
+                    offset=offset,
+                    timeout=25,
+                    allowed_updates='["message","callback_query"]',
+                )
+                if self.heartbeat_file is not None:
+                    self.heartbeat_file.touch()
                 for update in result.get("result", []):
                     if not isinstance(update, dict):
                         continue

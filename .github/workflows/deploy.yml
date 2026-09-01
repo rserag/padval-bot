@@ -1,0 +1,78 @@
+name: Deploy production
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: padval-bot-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Check out tested revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Prepare restricted SSH client
+        env:
+          PADVAL_DEPLOY_SSH_KEY: ${{ secrets.PADVAL_DEPLOY_SSH_KEY }}
+          PADVAL_DEPLOY_KNOWN_HOSTS: ${{ vars.PADVAL_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          test -n "$PADVAL_DEPLOY_SSH_KEY"
+          test -n "$PADVAL_DEPLOY_KNOWN_HOSTS"
+          install -d -m 0700 "$RUNNER_TEMP/padval-ssh"
+          printf '%s\n' "$PADVAL_DEPLOY_SSH_KEY" > "$RUNNER_TEMP/padval-ssh/key"
+          printf '%s\n' "$PADVAL_DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/padval-ssh/known_hosts"
+          chmod 0600 "$RUNNER_TEMP/padval-ssh/key" "$RUNNER_TEMP/padval-ssh/known_hosts"
+
+      - name: Package tested release
+        run: |
+          git ls-files \
+            'src/padval_bot/*.py' \
+            'tests/test_*.py' \
+            'config/torrent-locations.yaml' \
+            'deploy/padval-status-bot.service' \
+            'pyproject.toml' 'README.md' 'SECURITY.md' \
+            > "$RUNNER_TEMP/padval-bot-release-files"
+          tar -czf "$RUNNER_TEMP/padval-bot-release.tar.gz" \
+            -T "$RUNNER_TEMP/padval-bot-release-files"
+
+      - name: Deploy and verify
+        env:
+          PADVAL_DEPLOY_HOST: ${{ vars.PADVAL_DEPLOY_HOST }}
+          PADVAL_DEPLOY_PORT: ${{ vars.PADVAL_DEPLOY_PORT }}
+          PADVAL_DEPLOY_USER: ${{ vars.PADVAL_DEPLOY_USER }}
+          REVISION: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          test -n "$PADVAL_DEPLOY_HOST"
+          test -n "$PADVAL_DEPLOY_PORT"
+          test -n "$PADVAL_DEPLOY_USER"
+          ssh -i "$RUNNER_TEMP/padval-ssh/key" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/padval-ssh/known_hosts" \
+            -p "$PADVAL_DEPLOY_PORT" \
+            "$PADVAL_DEPLOY_USER@$PADVAL_DEPLOY_HOST" \
+            "deploy $REVISION" < "$RUNNER_TEMP/padval-bot-release.tar.gz"
+          ssh -i "$RUNNER_TEMP/padval-ssh/key" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/padval-ssh/known_hosts" \
+            -p "$PADVAL_DEPLOY_PORT" \
+            "$PADVAL_DEPLOY_USER@$PADVAL_DEPLOY_HOST" status

@@ -88,3 +88,11 @@ Build and test a new checkout first, then reinstall it into the existing
 virtual environment and restart only `padval-bot.service`. Keep the private
 configuration and state directory in place. Roll back by reinstalling the
 previous known-good Git revision.
+
+For automatic production releases, install the root-owned controller and
+forced-command entry point from `deploy/`, create a dedicated
+`padvalbot-deploy` account with no Docker access, and store only its restricted
+SSH private key as the `PADVAL_DEPLOY_SSH_KEY` production environment secret.
+The deploy workflow sends the exact tested revision, performs live destination
+preflight checks, waits for a fresh Telegram polling heartbeat, and restores
+the prior release if the candidate does not become healthy.

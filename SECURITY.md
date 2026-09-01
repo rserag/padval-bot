@@ -20,6 +20,10 @@ available. Otherwise contact the maintainer privately before sharing details.
 - Treat Docker socket access as root-equivalent.
 - Review status output before adding checks; summaries can still reveal useful
   infrastructure information to an unauthorized recipient.
+- Keep complete magnet links out of logs and fixtures. Tracker parameters can
+  contain private passkeys.
+- Require custom torrent destinations to resolve below a narrow configured
+  application root and verify them as the qBittorrent service account.
 
 The project intentionally does not support tokens passed as command-line
 arguments or committed inline configuration values.
