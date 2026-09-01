@@ -34,3 +34,10 @@ class TelegramAuthorizationTests(unittest.TestCase):
     def test_wrong_pairing_secret_is_ignored(self):
         self.assertFalse(self.bot.authorize({"id": 42, "type": "private"}, ["wrong"]))
         self.assertFalse(self.chat.exists())
+
+    def test_send_uses_telegram_html(self):
+        calls = []
+        self.bot.api = lambda method, **params: calls.append((method, params)) or {"ok": True}
+        self.bot.send(42, "<b>healthy</b>")
+        self.assertEqual(calls[0][0], "sendMessage")
+        self.assertEqual(calls[0][1]["parse_mode"], "HTML")

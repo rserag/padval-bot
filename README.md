@@ -13,24 +13,28 @@ consumes incoming commands.
 ## Example report
 
 ```text
-HOMELAB STATUS · 2026-08-30 17:30 UTC
-🟢 All monitored systems healthy
+🟢 HOMELAB STATUS
+All monitored systems healthy
+30 Aug 2026 · 17:30 UTC
 
-🌐 Network
+NETWORK
 ✅ gateway · ✅ router SSH · ✅ DNS
 
-🖥 app-vm · 198.51.100.10
-Up 12d 4h · load 0.18 · RAM 31% · root 27%
-✅ nginx · ✅ docker
-Apps: ✅ web running(2) · ✅ workers running(1)
+APP-VM  198.51.100.10
+⏱ 12d 4h · Load 0.18
+💾 RAM 31% · root 27%
+✅ Core services  2/2
+✅ Apps  2/2 active
+✅ Containers  3/3 healthy
 
-🖥 storage-vm · 203.0.113.20
-Up 12d 3h · load 0.08 · RAM 42% · root 22% · data 61%
-✅ docker · ✅ postgresql · ✅ alloy · ✅ mdmonitor
-RAID md0: ✅ [UU] · spare ✅ · mismatch 0
+STORAGE-VM  203.0.113.20
+⏱ 12d 3h · Load 0.08
+💾 RAM 42% · root 22% · data 61%
+✅ Core services  4/4
+✅ RAID md0 · [UU] · spare yes · mismatch 0
 
-🌍 HTTP
-✅ example app 200
+HTTP
+✅ Endpoints  1/1 responding
 ```
 
 The addresses above are reserved documentation ranges, not a real deployment.

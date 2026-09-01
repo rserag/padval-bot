@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import html
 import json
 import os
 import shlex
@@ -323,6 +324,18 @@ def _host_issues(host: dict[str, Any]) -> list[str]:
     return issues
 
 
+def _finish_html(lines: list[str], limit: int = 4000) -> str:
+    """Keep Telegram HTML valid by truncating only between complete lines."""
+    result: list[str] = []
+    for line in lines:
+        candidate = "\n".join([*result, line])
+        if len(candidate) > limit - 40:
+            result.append("<i>…report truncated</i>")
+            break
+        result.append(line)
+    return "\n".join(result)
+
+
 def render_report(snapshot: dict[str, Any], title: str = "SYSTEM STATUS") -> str:
     issues: list[str] = []
     for item in snapshot.get("network", []):
@@ -339,68 +352,102 @@ def render_report(snapshot: dict[str, Any], title: str = "SYSTEM STATUS") -> str
 
     generated = snapshot.get("generated_at")
     stamp = generated.strftime("%Y-%m-%d %H:%M %Z") if hasattr(generated, "strftime") else str(generated)
-    overall = "🟢 All monitored systems healthy" if not issues else f"🟠 {len(issues)} issue{'s' if len(issues) != 1 else ''} detected"
-    lines = [f"{title} · {stamp}", overall]
+    overall = "All monitored systems healthy" if not issues else f"{len(issues)} issue{'s' if len(issues) != 1 else ''} detected"
+    lines = [
+        f"{'🟢' if not issues else '🟠'} <b>{html.escape(title)}</b>",
+        f"<b>{html.escape(overall)}</b>",
+        f"<code>{html.escape(stamp)}</code>",
+    ]
 
     network = snapshot.get("network", [])
     if network:
-        lines.extend(["", "🌐 Network"])
-        lines.append(" · ".join(f"{'✅' if x['healthy'] else '❌'} {x['name']}" for x in network))
+        lines.extend(["", "<b>NETWORK</b>"])
+        lines.append("  ".join(f"{'✅' if x['healthy'] else '❌'} {html.escape(str(x['name']))}" for x in network))
     if router and router.get("healthy"):
         lines.append(
-            f"RouterOS {router.get('version', '?')} · up {router.get('uptime', '?')} · "
-            f"CPU {router.get('cpu', '?')}% · WG {router.get('wg', '?')} ({router.get('peers', '?')} peers)"
+            f"RouterOS <b>{html.escape(str(router.get('version', '?')))}</b> · "
+            f"up {html.escape(str(router.get('uptime', '?')))} · "
+            f"CPU {html.escape(str(router.get('cpu', '?')))}% · "
+            f"WG {html.escape(str(router.get('wg', '?')))} ({html.escape(str(router.get('peers', '?')))} peers)"
         )
 
     for host in snapshot.get("hosts", []):
-        lines.extend(["", f"🖥 {host['name']} · {host.get('address', '?')}"])
+        lines.extend([
+            "",
+            f"<b>{html.escape(str(host['name']).upper())}</b>  <code>{html.escape(str(host.get('address', '?')))}</code>",
+        ])
         if not host.get("reachable"):
             lines.append("❌ Host unreachable")
             continue
-        filesystems = " · ".join(f"{name} {value if value is not None else '?'}%" for name, value in host.get("filesystems", {}).items())
         lines.append(
-            f"Up {format_duration(int(host.get('uptime', 0)))} · load {host.get('load', '?')} · "
-            f"RAM {host.get('memory_pct', '?')}%" + (f" · {filesystems}" if filesystems else "")
+            f"⏱ {format_duration(int(host.get('uptime', 0)))} · "
+            f"Load {html.escape(str(host.get('load', '?')))}"
         )
+        storage = [f"RAM {html.escape(str(host.get('memory_pct', '?')))}%"]
+        storage.extend(
+            f"{html.escape(str(name))} {html.escape(str(value if value is not None else '?'))}%"
+            for name, value in host.get("filesystems", {}).items()
+        )
+        lines.append("💾 " + " · ".join(storage))
         services = host.get("services", {})
         if services:
-            lines.append(" · ".join(f"{'✅' if ok else '❌'} {unit}" for unit, ok in services.items()))
+            healthy_services = sum(bool(value) for value in services.values())
+            lines.append(
+                f"{'✅' if healthy_services == len(services) else '❌'} Core services  "
+                f"<b>{healthy_services}/{len(services)}</b>"
+            )
         projects = host.get("compose_projects", [])
         if projects:
             dormant = set(host.get("expected_dormant_projects", []))
+            monitored = [project for project in projects if project.get("Name") not in dormant]
+            dormant_present = [project for project in projects if project.get("Name") in dormant]
+            active = sum(str(project.get("Status", "")).startswith("running") for project in monitored)
             lines.append(
-                "Apps: " + " · ".join(
-                    f"{'⏸' if p.get('Name') in dormant else ('✅' if str(p.get('Status', '')).startswith('running') else '❌')} "
-                    f"{p.get('Name')} {p.get('Status')}" for p in projects
+                f"{'✅' if active == len(monitored) else '❌'} Apps  <b>{active}/{len(monitored)} active</b>"
+            )
+            if dormant_present:
+                lines.append(
+                    f"⏸ {len(dormant_present)} dormant project{'s' if len(dormant_present) != 1 else ''}"
                 )
+        containers = host.get("containers", [])
+        if containers:
+            expected_stopped = set(host.get("expected_stopped", []))
+            monitored_rows = [str(row).split("|", 2) for row in containers if str(row).split("|", 1)[0] not in expected_stopped]
+            healthy_containers = sum(
+                len(parts) >= 2 and parts[1] == "running" and (len(parts) < 3 or "unhealthy" not in parts[2].lower())
+                for parts in monitored_rows
+            )
+            lines.append(
+                f"{'✅' if healthy_containers == len(monitored_rows) else '❌'} Containers  "
+                f"<b>{healthy_containers}/{len(monitored_rows)} healthy</b>"
             )
         raid = host.get("raid")
         if raid:
-            spare = " · spare " + ("✅" if raid.get("spare_ok") else "❌") if raid.get("spare_ok") is not None else ""
+            spare = " · spare " + ("yes" if raid.get("spare_ok") else "no") if raid.get("spare_ok") is not None else ""
             lines.append(
-                f"RAID {raid.get('device')}: {'✅' if raid.get('members_ok') else '❌'} {raid.get('members_label')}"
-                f"{spare} · mismatch {raid.get('mismatch', '?')}"
+                f"{'✅' if raid.get('members_ok') and raid.get('spare_ok') is not False and raid.get('mismatch') in (0, None) else '❌'} "
+                f"RAID <b>{html.escape(str(raid.get('device', '?')))}</b> · "
+                f"<code>{html.escape(str(raid.get('members_label', '?')))}</code>"
+                f"{spare} · mismatch {html.escape(str(raid.get('mismatch', '?')))}"
             )
         for name, value in host.get("process_memory", {}).items():
             if isinstance(value, int):
-                lines.append(f"{name} RAM: {value / (1024 ** 3):.1f} GiB")
-        lines.extend(f"Note: {note}" for note in host.get("notes", []))
+                lines.append(f"ℹ️ {html.escape(str(name))} memory  <b>{value / (1024 ** 3):.1f} GiB</b>")
+        lines.extend(f"ℹ️ {html.escape(str(note))}" for note in host.get("notes", []))
 
     http = snapshot.get("http", [])
     if http:
-        healthy = [f"{x['name']} {x.get('status') or 'timeout'}" for x in http if x["healthy"]]
-        failed = [f"{x['name']} {x.get('status') or 'timeout'}" for x in http if not x["healthy"]]
-        lines.extend(["", "🌍 HTTP"])
-        if healthy:
-            lines.append("✅ " + " · ".join(healthy))
-        if failed:
-            lines.append("❌ " + " · ".join(failed))
+        healthy_http = sum(bool(item["healthy"]) for item in http)
+        lines.extend([
+            "",
+            "<b>HTTP</b>",
+            f"{'✅' if healthy_http == len(http) else '❌'} Endpoints  <b>{healthy_http}/{len(http)} responding</b>",
+        ])
 
     if issues:
-        lines.extend(["", "Needs attention:"])
-        lines.extend(f"• {issue}" for issue in issues[:12])
+        lines.extend(["", "<b>ATTENTION</b>"])
+        lines.extend(f"❌ {html.escape(issue)}" for issue in issues[:12])
         if len(issues) > 12:
-            lines.append(f"• +{len(issues) - 12} more")
+            lines.append(f"<i>+{len(issues) - 12} more</i>")
 
-    message = "\n".join(lines)
-    return message if len(message) <= 4000 else message[:3960].rstrip() + "\n…truncated"
+    return _finish_html(lines)

@@ -48,3 +48,17 @@ class CollectorTests(unittest.TestCase):
         self.assertIn("4 issues detected", report)
         self.assertIn("storage unreachable", report)
         self.assertIn("site returned 502", report)
+
+    def test_render_escapes_dynamic_html(self):
+        snapshot = {
+            "generated_at": "now",
+            "network": [{"name": "router <unsafe>", "healthy": True}],
+            "routeros": None,
+            "hosts": [{"name": "vm & host", "address": "192.0.2.10", "reachable": False}],
+            "http": [],
+        }
+        report = render_report(snapshot, "STATUS <TEST>")
+        self.assertIn("STATUS &lt;TEST&gt;", report)
+        self.assertIn("router &lt;unsafe&gt;", report)
+        self.assertIn("VM &amp; HOST", report)
+        self.assertNotIn("<unsafe>", report)

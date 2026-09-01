@@ -38,7 +38,13 @@ class TelegramBot:
         return result
 
     def send(self, chat_id: int, text: str) -> None:
-        self.api("sendMessage", chat_id=chat_id, text=text, disable_web_page_preview="true")
+        self.api(
+            "sendMessage",
+            chat_id=chat_id,
+            text=text,
+            parse_mode="HTML",
+            disable_web_page_preview="true",
+        )
 
     @staticmethod
     def read_int(path: Path, default: int = 0) -> int:
