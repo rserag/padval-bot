@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+
+command_value=${SSH_ORIGINAL_COMMAND-}
+case "$command_value" in
+    "status")
+        exec sudo -n /usr/local/sbin/padval-bot-deploy status
+        ;;
+    "deploy "*)
+        revision=${command_value#deploy }
+        case "$revision" in
+            *[!0-9a-f]*|"") exit 64 ;;
+        esac
+        [ "${#revision}" -eq 40 ] || exit 64
+        exec sudo -n /usr/local/sbin/padval-bot-deploy deploy "$revision"
+        ;;
+    *)
+        exit 64
+        ;;
+esac

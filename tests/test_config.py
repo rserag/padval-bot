@@ -48,7 +48,23 @@ class ConfigTests(unittest.TestCase):
             "user": "reader",
             "identity_file": "/run/key",
             "known_hosts_file": "/run/known_hosts",
-            "wireguard_interface": 'wg1\"; /system reboot',
+            "wireguard_interface": 'wg1"; /system reboot',
         }
         with self.assertRaises(ConfigError):
             load_config(self.write(config))
+
+    def test_accepts_torrent_runtime_configuration(self):
+        config = self.valid()
+        config["torrent"] = {
+            "enabled": True,
+            "base_url": "http://192.0.2.20:8080",
+            "locations_file": "/opt/padval-bot/current/config/torrent-locations.yaml",
+            "path_check_ssh": {
+                "host": "192.0.2.20",
+                "user": "data",
+                "identity_file": "/run/key",
+                "known_hosts_file": "/run/known_hosts",
+            },
+        }
+        loaded = load_config(self.write(config))
+        self.assertTrue(loaded["torrent"]["enabled"])

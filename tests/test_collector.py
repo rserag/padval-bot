@@ -15,20 +15,22 @@ class CollectorTests(unittest.TestCase):
             "generated_at": dt.datetime(2026, 1, 2, 3, 4, tzinfo=dt.timezone.utc),
             "network": [{"name": "gateway", "healthy": True}],
             "routeros": None,
-            "hosts": [{
-                "name": "vm",
-                "address": "192.0.2.10",
-                "reachable": True,
-                "uptime": 90000,
-                "load": 0.1,
-                "memory_pct": 20,
-                "filesystems": {"root": 30},
-                "services": {"nginx": True},
-                "containers": ["web|running|Up 1 hour (healthy)"],
-                "compose_projects": [],
-                "process_memory": {},
-                "notes": [],
-            }],
+            "hosts": [
+                {
+                    "name": "vm",
+                    "address": "192.0.2.10",
+                    "reachable": True,
+                    "uptime": 90000,
+                    "load": 0.1,
+                    "memory_pct": 20,
+                    "filesystems": {"root": 30},
+                    "services": {"nginx": True},
+                    "containers": ["web|running|Up 1 hour (healthy)"],
+                    "compose_projects": [],
+                    "process_memory": {},
+                    "notes": [],
+                }
+            ],
             "http": [{"name": "web", "status": 200, "healthy": True}],
         }
         report = render_report(snapshot, "TEST")
@@ -54,7 +56,9 @@ class CollectorTests(unittest.TestCase):
             "generated_at": "now",
             "network": [{"name": "router <unsafe>", "healthy": True}],
             "routeros": None,
-            "hosts": [{"name": "vm & host", "address": "192.0.2.10", "reachable": False}],
+            "hosts": [
+                {"name": "vm & host", "address": "192.0.2.10", "reachable": False}
+            ],
             "http": [],
         }
         report = render_report(snapshot, "STATUS <TEST>")
