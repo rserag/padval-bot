@@ -2,7 +2,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from padval_bot.torrent import TorrentSnapshot, TorrentTrackingSettings
+from padval_bot.torrent import (
+    MediaRefreshSettings,
+    TorrentSnapshot,
+    TorrentTrackingSettings,
+)
 from padval_bot.tracking import TrackingStore
 
 
@@ -99,6 +103,60 @@ class TrackingStoreTests(unittest.TestCase):
             now=101,
         )
         self.assertFalse(enabled)
+
+    def test_media_refresh_is_debounced_and_retried_durably(self):
+        settings = TorrentTrackingSettings(
+            enabled=True,
+            notify_on_complete=False,
+            media_refresh=MediaRefreshSettings(
+                enabled=True,
+                debounce_seconds=60,
+                retry_base_seconds=300,
+                retry_max_seconds=3600,
+            ),
+        )
+        store = TrackingStore(self.path, settings)
+        store.reconcile(
+            (snapshot(),),
+            chat_id=42,
+            now=100,
+            destination_label=lambda path: "Movies",
+        )
+        events, _ = store.reconcile(
+            (snapshot(complete=True),),
+            chat_id=42,
+            now=200,
+            destination_label=lambda path: "Movies",
+        )
+        self.assertEqual(events, ())
+        self.assertIsNone(store.refresh_due(now=259))
+        batch = store.refresh_due(now=260)
+        self.assertIsNotNone(batch)
+        store.mark_refresh_attempt(batch, now=260, success=False)
+
+        reloaded = TrackingStore(self.path, settings)
+        self.assertIsNone(reloaded.refresh_due(now=559))
+        retry = reloaded.refresh_due(now=560)
+        self.assertIsNotNone(retry)
+        reloaded.mark_refresh_attempt(retry, now=560, success=True)
+        self.assertIsNone(reloaded.refresh_due(now=1000))
+
+    def test_version_one_notified_completion_is_not_refreshed(self):
+        self.path.write_text(
+            '{"version":1,"imported_existing":true,"records":{'
+            '"old":{"record_id":"old","chat_id":42,'
+            '"destination_label":"Movies","notifications_enabled":true,'
+            '"created_at":100,"qbit_hash":"' + HASH + '",'
+            '"discovery_tag":null,"completion_notified_at":200,'
+            '"completion_on":200}}}\n',
+            encoding="utf-8",
+        )
+        settings = TorrentTrackingSettings(
+            enabled=True,
+            media_refresh=MediaRefreshSettings(enabled=True),
+        )
+        store = TrackingStore(self.path, settings)
+        self.assertIsNone(store.refresh_due(now=1000))
 
 
 if __name__ == "__main__":

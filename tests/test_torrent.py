@@ -34,6 +34,11 @@ torrent:
     notify_on_complete: true
     import_incomplete_tagged_on_start: true
     completed_retention_hours: 72
+    media_refresh:
+      enabled: true
+      debounce_seconds: 60
+      retry_base_seconds: 300
+      retry_max_seconds: 3600
 """
 
 
@@ -90,6 +95,8 @@ class TorrentTests(unittest.TestCase):
         self.assertEqual(locations.pending_ttl_seconds, 600)
         self.assertTrue(locations.tracking.enabled)
         self.assertEqual(locations.tracking.poll_interval_seconds, 25)
+        self.assertTrue(locations.tracking.media_refresh.enabled)
+        self.assertEqual(locations.tracking.media_refresh.debounce_seconds, 60)
 
     def test_rejects_broad_custom_root(self):
         self.locations_path.write_text(

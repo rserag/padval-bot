@@ -26,8 +26,12 @@ class TrackingRecord:
     created_at: float
     qbit_hash: str | None = None
     discovery_tag: str | None = None
+    completion_detected_at: float | None = None
     completion_notified_at: float | None = None
     completion_on: int | None = None
+    media_refresh_completed_at: float | None = None
+    media_refresh_last_attempt_at: float | None = None
+    media_refresh_failures: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,8 +42,13 @@ class CompletionEvent:
     snapshot: TorrentSnapshot
 
 
+@dataclass(frozen=True, slots=True)
+class MediaRefreshBatch:
+    record_ids: tuple[str, ...]
+
+
 class TrackingStore:
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self, path: Path, settings: TorrentTrackingSettings) -> None:
         self.path = path
@@ -67,7 +76,9 @@ class TrackingStore:
         return value
 
     @classmethod
-    def _record_from_json(cls, record_id: str, value: object) -> TrackingRecord:
+    def _record_from_json(
+        cls, record_id: str, value: object, *, source_version: int
+    ) -> TrackingRecord:
         if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", record_id) or not isinstance(
             value, dict
         ):
@@ -78,8 +89,18 @@ class TrackingStore:
         destination = value.get("destination_label")
         notifications = value.get("notifications_enabled")
         created_at = value.get("created_at")
+        detected_at = value.get("completion_detected_at")
         notified_at = value.get("completion_notified_at")
         completion_on = value.get("completion_on")
+        refresh_completed_at = value.get("media_refresh_completed_at")
+        refresh_last_attempt_at = value.get("media_refresh_last_attempt_at")
+        refresh_failures = value.get("media_refresh_failures", 0)
+        timestamps = (
+            detected_at,
+            notified_at,
+            refresh_completed_at,
+            refresh_last_attempt_at,
+        )
         if (
             not isinstance(chat_id, int)
             or isinstance(chat_id, bool)
@@ -88,12 +109,10 @@ class TrackingStore:
             or not isinstance(notifications, bool)
             or isinstance(created_at, bool)
             or not isinstance(created_at, (int, float))
-            or (
-                notified_at is not None
-                and (
-                    isinstance(notified_at, bool)
-                    or not isinstance(notified_at, (int, float))
-                )
+            or any(
+                item is not None
+                and (isinstance(item, bool) or not isinstance(item, (int, float)))
+                for item in timestamps
             )
             or (
                 completion_on is not None
@@ -102,8 +121,16 @@ class TrackingStore:
                     or not isinstance(completion_on, int)
                 )
             )
+            or isinstance(refresh_failures, bool)
+            or not isinstance(refresh_failures, int)
+            or not 0 <= refresh_failures <= 1000
         ):
             raise TrackingStateError("torrent tracking state contains invalid values")
+        # Version 1 predates media refreshes. Treat already-notified historical
+        # completions as satisfied so an upgrade does not rescan old downloads.
+        if source_version == 1 and notified_at is not None:
+            detected_at = notified_at
+            refresh_completed_at = notified_at
         return TrackingRecord(
             record_id=record_id,
             chat_id=chat_id,
@@ -112,10 +139,24 @@ class TrackingStore:
             created_at=float(created_at),
             qbit_hash=cls._valid_hash(value.get("qbit_hash")),
             discovery_tag=cls._valid_tag(value.get("discovery_tag")),
+            completion_detected_at=(
+                float(detected_at) if detected_at is not None else None
+            ),
             completion_notified_at=(
                 float(notified_at) if notified_at is not None else None
             ),
             completion_on=completion_on,
+            media_refresh_completed_at=(
+                float(refresh_completed_at)
+                if refresh_completed_at is not None
+                else None
+            ),
+            media_refresh_last_attempt_at=(
+                float(refresh_last_attempt_at)
+                if refresh_last_attempt_at is not None
+                else None
+            ),
+            media_refresh_failures=refresh_failures,
         )
 
     def _load(self) -> None:
@@ -131,15 +172,18 @@ class TrackingStore:
             payload = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise TrackingStateError("torrent tracking state is invalid") from exc
-        if not isinstance(payload, dict) or payload.get("version") != self.VERSION:
+        if not isinstance(payload, dict) or payload.get("version") not in {1, 2}:
             raise TrackingStateError("torrent tracking state version is unsupported")
+        source_version = int(payload["version"])
         imported = payload.get("imported_existing", False)
         rows = payload.get("records", {})
         if not isinstance(imported, bool) or not isinstance(rows, dict):
             raise TrackingStateError("torrent tracking state is invalid")
         self.imported_existing = imported
         self.records = {
-            record_id: self._record_from_json(record_id, value)
+            record_id: self._record_from_json(
+                record_id, value, source_version=source_version
+            )
             for record_id, value in rows.items()
         }
 
@@ -250,6 +294,19 @@ class TrackingStore:
                 del self.records[record_id]
                 changed = True
 
+        for record in self.records.values():
+            if record.qbit_hash is None:
+                continue
+            snapshot = by_hash.get(record.qbit_hash)
+            if (
+                snapshot is not None
+                and snapshot.complete
+                and record.completion_detected_at is None
+            ):
+                record.completion_detected_at = now
+                record.completion_on = snapshot.completion_on
+                changed = True
+
         events = tuple(
             CompletionEvent(
                 record.record_id, record.chat_id, record.destination_label, snapshot
@@ -310,3 +367,54 @@ class TrackingStore:
         record.completion_on = completion_on
         record.completion_notified_at = now
         self._save()
+
+    def refresh_due(self, *, now: float) -> MediaRefreshBatch | None:
+        settings = self.settings.media_refresh
+        if not settings.enabled:
+            return None
+        pending = [
+            record
+            for record in self.records.values()
+            if record.completion_detected_at is not None
+            and record.media_refresh_completed_at is None
+        ]
+        if not pending:
+            return None
+        newest_completion = max(
+            record.completion_detected_at or 0.0 for record in pending
+        )
+        if now < newest_completion + settings.debounce_seconds:
+            return None
+        last_attempt = max(
+            (record.media_refresh_last_attempt_at or 0.0 for record in pending),
+            default=0.0,
+        )
+        failures = max(record.media_refresh_failures for record in pending)
+        if last_attempt:
+            delay = min(
+                settings.retry_base_seconds * (2 ** max(0, failures - 1)),
+                settings.retry_max_seconds,
+            )
+            if now < last_attempt + delay:
+                return None
+        return MediaRefreshBatch(tuple(record.record_id for record in pending))
+
+    def mark_refresh_attempt(
+        self, batch: MediaRefreshBatch, *, now: float, success: bool
+    ) -> None:
+        changed = False
+        for record_id in batch.record_ids:
+            record = self.records.get(record_id)
+            if record is None or record.media_refresh_completed_at is not None:
+                continue
+            record.media_refresh_last_attempt_at = now
+            if success:
+                record.media_refresh_completed_at = now
+                record.media_refresh_failures = 0
+            else:
+                record.media_refresh_failures = min(
+                    1000, record.media_refresh_failures + 1
+                )
+            changed = True
+        if changed:
+            self._save()

@@ -68,3 +68,24 @@ class ConfigTests(unittest.TestCase):
         }
         loaded = load_config(self.write(config))
         self.assertTrue(loaded["torrent"]["enabled"])
+
+    def test_accepts_jellyfin_runtime_configuration(self):
+        config = self.valid()
+        config["jellyfin"] = {
+            "enabled": True,
+            "base_url": "http://192.0.2.20:8096",
+            "api_key_file": "/run/jellyfin-api-key",
+            "timeout_seconds": 10,
+        }
+        loaded = load_config(self.write(config))
+        self.assertTrue(loaded["jellyfin"]["enabled"])
+
+    def test_rejects_relative_jellyfin_key_path(self):
+        config = self.valid()
+        config["jellyfin"] = {
+            "enabled": True,
+            "base_url": "http://192.0.2.20:8096",
+            "api_key_file": "jellyfin-api-key",
+        }
+        with self.assertRaises(ConfigError):
+            load_config(self.write(config))

@@ -113,6 +113,7 @@ def extract_archive(archive: Path, destination: Path) -> None:
         "src/padval_bot/__main__.py",
         "src/padval_bot/main.py",
         "src/padval_bot/config.py",
+        "src/padval_bot/jellyfin.py",
         "src/padval_bot/telegram.py",
         "src/padval_bot/torrent.py",
     }
@@ -152,6 +153,7 @@ def validate_release(release: Path) -> None:
     ]
     run([*common, "--check-config"], env=environment)
     run([*common, "--check-torrent-paths"], env=environment)
+    run([*common, "--check-jellyfin"], env=environment)
 
 
 def atomic_symlink(target: Path, link: Path) -> None:

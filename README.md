@@ -80,7 +80,7 @@ For a persistent installation, follow [docs/deployment.md](docs/deployment.md).
 
 ## Configuration
 
-The JSON file has six main areas:
+The JSON file has seven main areas:
 
 - `telegram`: token, authorized-chat, pairing-secret, and runtime-state files.
 - `network_checks`: ICMP, TCP, or DNS checks.
@@ -91,6 +91,8 @@ The JSON file has six main areas:
 - `http_checks`: endpoint-specific healthy HTTP status ranges and timeouts.
 - `torrent`: optional private qBittorrent endpoint and SSH path-check settings.
   Public destination choices live in `config/torrent-locations.yaml`.
+- `jellyfin`: optional private Jellyfin endpoint and API-key file. The key is
+  read from a protected file and is never placed in Git or a URL.
 
 Start from [config.example.json](config.example.json). No live configuration is
 loaded from environment variables or command-line secrets, which keeps tokens
@@ -123,6 +125,13 @@ watched automatically. `/downloads` shows progress, speed, ETA, state, and
 destination. Each download has a notification toggle, and the bot sends one
 durable completion notification even when completion happens across a bot
 restart. Tracking state contains no magnet or tracker URL.
+
+When `tracking.media_refresh` is enabled and private Jellyfin access is
+configured, each newly completed download queues a full library scan.
+Completions within the configured debounce window are coalesced into one
+request. Pending refreshes and failed attempts survive restarts; failures retry
+with bounded exponential backoff. Jellyfin credentials remain outside the
+repository.
 
 ## License
 

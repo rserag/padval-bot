@@ -7,6 +7,7 @@ from copy import deepcopy
 
 from .collector import collect_snapshot, render_report
 from .config import load_config
+from .jellyfin import JellyfinService
 from .telegram import TelegramBot
 from .torrent import TorrentService
 
@@ -26,6 +27,11 @@ def main() -> None:
         help="validate configured torrent destinations and exit",
     )
     parser.add_argument(
+        "--check-jellyfin",
+        action="store_true",
+        help="validate authenticated Jellyfin connectivity and exit",
+    )
+    parser.add_argument(
         "--torrent-locations",
         help="override the public torrent locations file for release validation",
     )
@@ -41,11 +47,22 @@ def main() -> None:
         if isinstance(torrent_config, dict) and torrent_config.get("enabled")
         else None
     )
+    jellyfin_config = config.get("jellyfin")
+    jellyfin_service = (
+        JellyfinService(jellyfin_config)
+        if isinstance(jellyfin_config, dict) and jellyfin_config.get("enabled")
+        else None
+    )
 
     if arguments.check_torrent_paths:
         if torrent_service is None:
             parser.error("torrent submission is not configured")
         torrent_service.preflight()
+        return
+    if arguments.check_jellyfin:
+        if jellyfin_service is None:
+            parser.error("Jellyfin integration is not configured")
+        jellyfin_service.preflight()
         return
     if arguments.check_config:
         return
@@ -58,4 +75,6 @@ def main() -> None:
     if arguments.once:
         print(build())
         return
-    TelegramBot(config["telegram"], build, torrent_service).run_forever()
+    TelegramBot(
+        config["telegram"], build, torrent_service, jellyfin_service
+    ).run_forever()

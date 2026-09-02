@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import html
 import json
+import logging
 import os
 import re
 import secrets
@@ -17,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .jellyfin import JellyfinError, JellyfinService
 from .torrent import (
     Magnet,
     TorrentError,
@@ -25,6 +27,9 @@ from .torrent import (
     TorrentSubmissionUncertain,
 )
 from .tracking import TrackingStateError, TrackingStore
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -41,6 +46,7 @@ class TelegramBot:
         config: dict[str, Any],
         status_builder: Callable[[], str],
         torrent_service: TorrentService | None = None,
+        jellyfin_service: JellyfinService | None = None,
         *,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
@@ -59,6 +65,7 @@ class TelegramBot:
             Path(config["heartbeat_file"]) if config.get("heartbeat_file") else None
         )
         self.torrent_service = torrent_service
+        self.jellyfin_service = jellyfin_service
         self.clock = clock
         self.wall_clock = wall_clock
         self.pending_torrents: dict[int, PendingTorrent] = {}
@@ -663,7 +670,13 @@ class TelegramBot:
                 "✅ <b>Download complete</b>\n\n"
                 f"{html.escape(name)}\n"
                 f"Size: {self._format_bytes(event.snapshot.size)}\n"
-                f"Destination: {html.escape(event.destination_label)}",
+                f"Destination: {html.escape(event.destination_label)}"
+                + (
+                    "\nJellyfin: library scan queued."
+                    if self.jellyfin_service is not None
+                    and self.tracking_store.settings.media_refresh.enabled
+                    else ""
+                ),
                 reply_markup={
                     "inline_keyboard": [
                         [{"text": "View downloads", "callback_data": "dl:list"}]
@@ -679,6 +692,26 @@ class TelegramBot:
                     )
                 except TrackingStateError:
                     return
+        if self.jellyfin_service is None:
+            return
+        now = self.wall_clock()
+        batch = self.tracking_store.refresh_due(now=now)
+        if batch is None:
+            return
+        try:
+            self.jellyfin_service.refresh_library()
+        except JellyfinError:
+            LOGGER.warning("Jellyfin library refresh failed; it will be retried")
+            success = False
+        else:
+            LOGGER.info("Jellyfin library refresh requested")
+            success = True
+        try:
+            self.tracking_store.mark_refresh_attempt(
+                batch, now=self.wall_clock(), success=success
+            )
+        except TrackingStateError:
+            return
 
     def handle_update(self, update: dict[str, Any]) -> None:
         callback = update.get("callback_query")
