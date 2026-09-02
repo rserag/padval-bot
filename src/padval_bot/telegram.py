@@ -18,7 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .jellyfin import JellyfinError, JellyfinService
+from .jellyfin import JellyfinError, JellyfinService, LibraryScanStatus
+from .scan_tracking import ScanTrackingStateError, ScanTrackingStore
 from .torrent import (
     Magnet,
     TorrentError,
@@ -41,6 +42,8 @@ class PendingTorrent:
 
 
 class TelegramBot:
+    SCAN_POLL_INTERVAL_SECONDS = 10
+
     def __init__(
         self,
         config: dict[str, Any],
@@ -76,6 +79,11 @@ class TelegramBot:
             )
             if torrent_service is not None
             and torrent_service.locations.tracking.enabled
+            else None
+        )
+        self.scan_tracking_store = (
+            ScanTrackingStore(self.state_dir / "jellyfin-scan-tracking.json")
+            if jellyfin_service is not None
             else None
         )
 
@@ -165,6 +173,75 @@ class TelegramBot:
             return f"{hours}h {minutes}m"
         days, hours = divmod(hours, 24)
         return f"{days}d {hours}h"
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        total = max(0, int(seconds))
+        if total < 60:
+            return f"{total}s"
+        minutes, remaining = divmod(total, 60)
+        if minutes < 60:
+            return f"{minutes}m {remaining}s"
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}h {minutes}m"
+
+    @staticmethod
+    def _scan_keyboard() -> dict[str, Any]:
+        return {
+            "inline_keyboard": [
+                [{"text": "Refresh status", "callback_data": "jfscan:refresh"}]
+            ]
+        }
+
+    def _scan_progress_view(
+        self, status: LibraryScanStatus, *, requested_at: float
+    ) -> tuple[str, dict[str, Any]]:
+        elapsed = self._format_duration(self.wall_clock() - requested_at)
+        if status.progress is None:
+            progress = "Jellyfin has not reported a percentage yet."
+        else:
+            filled = min(10, max(0, round(status.progress / 10)))
+            bar = "█" * filled + "░" * (10 - filled)
+            progress = f"<code>{bar}</code> {status.progress:.1f}%"
+        state = "Cancelling" if status.state.casefold() == "cancelling" else "Scanning"
+        return (
+            f"🔄 <b>Jellyfin library scan</b>\n"
+            f"{progress}\n"
+            f"State: {state}\n"
+            f"Elapsed: {elapsed}",
+            self._scan_keyboard(),
+        )
+
+    def _scan_starting_view(self, *, requested_at: float) -> tuple[str, dict[str, Any]]:
+        elapsed = self._format_duration(self.wall_clock() - requested_at)
+        return (
+            "🔄 <b>Jellyfin library scan</b>\n"
+            "Starting; waiting for Jellyfin to report progress.\n"
+            f"Elapsed: {elapsed}",
+            self._scan_keyboard(),
+        )
+
+    def _scan_finished_view(
+        self,
+        status: LibraryScanStatus,
+        *,
+        requested_at: float,
+        triggered_by_bot: bool,
+    ) -> str:
+        elapsed = self._format_duration(self.wall_clock() - requested_at)
+        outcome = (status.last_execution_status or "Completed").casefold()
+        duration_label = "Duration" if triggered_by_bot else "Tracked for"
+        if outcome in {"completed", "success"}:
+            return (
+                "✅ <b>Jellyfin library scan completed</b>\n"
+                f"{duration_label}: {elapsed}"
+            )
+        safe_outcome = html.escape(status.last_execution_status or status.state)
+        return (
+            "❌ <b>Jellyfin library scan did not complete successfully</b>\n"
+            f"Result: {safe_outcome}\n"
+            f"{duration_label}: {elapsed}"
+        )
 
     @staticmethod
     def _safe_torrent_name(value: str, limit: int = 120) -> str:
@@ -552,7 +629,235 @@ class TelegramBot:
         self.edit(chat_id, message_id, text, reply_markup=keyboard)
         return True
 
+    def _update_scan_tracking(self, status: LibraryScanStatus | None = None) -> bool:
+        if self.jellyfin_service is None or self.scan_tracking_store is None:
+            return False
+        record = self.scan_tracking_store.record
+        if record is None:
+            return False
+        if status is None:
+            status = self.jellyfin_service.scan_status()
+        record = self.scan_tracking_store.observe(active=status.active)
+        execution_changed = (
+            status.last_execution_end is not None
+            and status.last_execution_end != record.baseline_last_execution_end
+        )
+        finished = not status.active and (
+            execution_changed
+            or record.observed_running
+            or record.idle_observations >= 2
+        )
+        if status.active:
+            text, keyboard = self._scan_progress_view(
+                status, requested_at=record.requested_at
+            )
+        elif finished:
+            text = self._scan_finished_view(
+                status,
+                requested_at=record.requested_at,
+                triggered_by_bot=record.triggered_by_bot,
+            )
+            keyboard = {"inline_keyboard": []}
+        else:
+            text, keyboard = self._scan_starting_view(requested_at=record.requested_at)
+        self.edit(
+            record.chat_id,
+            record.message_id,
+            text,
+            reply_markup=keyboard,
+        )
+        if finished:
+            self.scan_tracking_store.clear()
+            LOGGER.info("Jellyfin library scan tracking completed")
+        return True
+
+    def _begin_scan_tracking(
+        self,
+        chat_id: int,
+        status: LibraryScanStatus,
+        *,
+        triggered_by_bot: bool,
+        baseline_last_execution_end: str | None,
+    ) -> None:
+        if self.scan_tracking_store is None:
+            return
+        requested_at = self.wall_clock()
+        if status.active:
+            text, keyboard = self._scan_progress_view(status, requested_at=requested_at)
+        else:
+            text, keyboard = self._scan_starting_view(requested_at=requested_at)
+        message_id = self.send(chat_id, text, reply_markup=keyboard)
+        if message_id is None:
+            LOGGER.warning("Telegram did not return a scan progress message id")
+            return
+        try:
+            self.scan_tracking_store.start(
+                chat_id=chat_id,
+                message_id=message_id,
+                requested_at=requested_at,
+                triggered_by_bot=triggered_by_bot,
+                baseline_last_execution_end=baseline_last_execution_end,
+                observed_running=status.active,
+            )
+            if not status.active:
+                self._update_scan_tracking(status)
+        except ScanTrackingStateError:
+            LOGGER.warning("Could not persist Jellyfin scan tracking state")
+            self.edit(
+                chat_id,
+                message_id,
+                "⚠️ <b>Jellyfin library scan started</b>\n"
+                "Automatic progress updates are unavailable; use /scanstatus.",
+                reply_markup={"inline_keyboard": []},
+            )
+
+    def _start_scan(self, chat_id: int) -> None:
+        if self.jellyfin_service is None or self.scan_tracking_store is None:
+            self.send(chat_id, "Jellyfin library scanning is not configured.")
+            return
+        if self.scan_tracking_store.record is not None:
+            try:
+                self._update_scan_tracking()
+            except (JellyfinError, ScanTrackingStateError):
+                LOGGER.warning("Could not refresh active Jellyfin scan tracking")
+            if self.scan_tracking_store.record is not None:
+                self.send(
+                    chat_id,
+                    "A Jellyfin library scan is already being followed. "
+                    "Use /scanstatus or its Refresh status button.",
+                )
+                return
+        try:
+            before = self.jellyfin_service.scan_status()
+        except JellyfinError:
+            before = None
+        if before is not None and before.active:
+            self._begin_scan_tracking(
+                chat_id,
+                before,
+                triggered_by_bot=False,
+                baseline_last_execution_end=before.last_execution_end,
+            )
+            return
+        try:
+            self.jellyfin_service.refresh_library()
+        except JellyfinError:
+            LOGGER.warning("Manual Jellyfin library refresh failed")
+            self.send(
+                chat_id,
+                "❌ Jellyfin library scan could not be started. Try /scan again.",
+            )
+            return
+        LOGGER.info("Manual Jellyfin library refresh requested")
+        try:
+            current = self.jellyfin_service.scan_status()
+        except JellyfinError:
+            current = LibraryScanStatus("Running", None, None, None)
+        baseline = (
+            before.last_execution_end
+            if before is not None
+            else current.last_execution_end
+        )
+        self._begin_scan_tracking(
+            chat_id,
+            current,
+            triggered_by_bot=True,
+            baseline_last_execution_end=baseline,
+        )
+
+    def _scan_status(self, chat_id: int) -> None:
+        if self.jellyfin_service is None or self.scan_tracking_store is None:
+            self.send(chat_id, "Jellyfin library scanning is not configured.")
+            return
+        if self.scan_tracking_store.record is not None:
+            try:
+                self._update_scan_tracking()
+            except (JellyfinError, ScanTrackingStateError):
+                self.send(chat_id, "Jellyfin scan status is temporarily unavailable.")
+            return
+        try:
+            status = self.jellyfin_service.scan_status()
+        except JellyfinError:
+            self.send(chat_id, "Jellyfin scan status is temporarily unavailable.")
+            return
+        if status.active:
+            self._begin_scan_tracking(
+                chat_id,
+                status,
+                triggered_by_bot=False,
+                baseline_last_execution_end=status.last_execution_end,
+            )
+        else:
+            self.send(
+                chat_id,
+                "✅ <b>Jellyfin library scan</b>\nNo scan is running right now.",
+            )
+
+    def _handle_scan_callback(self, callback: dict[str, Any]) -> bool:
+        if callback.get("data") != "jfscan:refresh":
+            return False
+        callback_id = callback.get("id")
+        message = callback.get("message")
+        if not isinstance(callback_id, str) or not isinstance(message, dict):
+            return True
+        chat = message.get("chat")
+        message_id = message.get("message_id")
+        if (
+            not isinstance(chat, dict)
+            or not isinstance(message_id, int)
+            or not self.authorize(chat, [])
+        ):
+            return True
+        if self.jellyfin_service is None or self.scan_tracking_store is None:
+            self.api(
+                "answerCallbackQuery",
+                callback_query_id=callback_id,
+                text="Jellyfin scanning is unavailable",
+            )
+            return True
+        try:
+            status = self.jellyfin_service.scan_status()
+            record = self.scan_tracking_store.record
+            if (
+                record is not None
+                and record.chat_id == int(chat["id"])
+                and record.message_id == message_id
+            ):
+                self._update_scan_tracking(status)
+            elif status.active:
+                self.scan_tracking_store.start(
+                    chat_id=int(chat["id"]),
+                    message_id=message_id,
+                    requested_at=self.wall_clock(),
+                    triggered_by_bot=False,
+                    baseline_last_execution_end=status.last_execution_end,
+                    observed_running=True,
+                )
+                self._update_scan_tracking(status)
+            else:
+                self.edit(
+                    int(chat["id"]),
+                    message_id,
+                    "✅ <b>Jellyfin library scan</b>\nNo scan is running right now.",
+                    reply_markup={"inline_keyboard": []},
+                )
+        except (JellyfinError, ScanTrackingStateError):
+            self.api(
+                "answerCallbackQuery",
+                callback_query_id=callback_id,
+                text="Jellyfin status is temporarily unavailable",
+            )
+            return True
+        self.api(
+            "answerCallbackQuery",
+            callback_query_id=callback_id,
+            text="Scan status refreshed",
+        )
+        return True
+
     def _handle_callback(self, callback: dict[str, Any]) -> None:
+        if self._handle_scan_callback(callback):
+            return
         if self._handle_download_callback(callback):
             return
         callback_id = callback.get("id")
@@ -756,24 +1061,9 @@ class TelegramBot:
                 return
             self.send(chat_id, text, reply_markup=keyboard)
         elif command == "/scan":
-            if self.jellyfin_service is None:
-                self.send(chat_id, "Jellyfin library scanning is not configured.")
-                return
-            try:
-                self.jellyfin_service.refresh_library()
-            except JellyfinError:
-                LOGGER.warning("Manual Jellyfin library refresh failed")
-                self.send(
-                    chat_id,
-                    "❌ Jellyfin library scan could not be started. Try /scan again.",
-                )
-            else:
-                LOGGER.info("Manual Jellyfin library refresh requested")
-                self.send(
-                    chat_id,
-                    "✅ <b>Jellyfin library scan started</b>\n"
-                    "New and changed media will appear as Jellyfin processes it.",
-                )
+            self._start_scan(chat_id)
+        elif command == "/scanstatus":
+            self._scan_status(chat_id)
         elif command == "/cancel":
             if self.pending_torrents.pop(chat_id, None) is not None:
                 self.send(chat_id, "Torrent request cancelled.")
@@ -787,7 +1077,10 @@ class TelegramBot:
                     "\nSend /downloads to view progress and notification settings."
                 )
             if self.jellyfin_service is not None:
-                commands += "\nSend /scan to start a Jellyfin library scan."
+                commands += (
+                    "\nSend /scan to start and follow a Jellyfin library scan."
+                    "\nSend /scanstatus to check or follow the current scan."
+                )
             self.send(chat_id, commands)
 
     def _bot_commands(self) -> list[dict[str, str]]:
@@ -809,8 +1102,14 @@ class TelegramBot:
                 ]
             )
         if self.jellyfin_service is not None:
-            commands.append(
-                {"command": "scan", "description": "Scan Jellyfin libraries"}
+            commands.extend(
+                [
+                    {"command": "scan", "description": "Scan Jellyfin libraries"},
+                    {
+                        "command": "scanstatus",
+                        "description": "Jellyfin scan progress",
+                    },
+                ]
             )
         commands.append({"command": "help", "description": "Show available commands"})
         return commands
@@ -824,8 +1123,10 @@ class TelegramBot:
             self.heartbeat_file.touch()
         offset = self.read_int(self.offset_file)
         next_tracking_poll = 0.0
+        next_scan_poll = 0.0
         while True:
             try:
+                deadlines: list[float] = []
                 if self.tracking_store is not None and self.torrent_service is not None:
                     now = self.clock()
                     if now >= next_tracking_poll:
@@ -834,9 +1135,27 @@ class TelegramBot:
                             now
                             + self.torrent_service.locations.tracking.poll_interval_seconds
                         )
-                    timeout = max(1, min(25, int(next_tracking_poll - self.clock())))
-                else:
-                    timeout = 25
+                    deadlines.append(next_tracking_poll)
+                if (
+                    self.scan_tracking_store is not None
+                    and self.scan_tracking_store.record is not None
+                ):
+                    now = self.clock()
+                    if now >= next_scan_poll:
+                        try:
+                            self._update_scan_tracking()
+                        except (JellyfinError, ScanTrackingStateError):
+                            LOGGER.warning(
+                                "Jellyfin scan progress check failed; it will be retried"
+                            )
+                        next_scan_poll = now + self.SCAN_POLL_INTERVAL_SECONDS
+                    if self.scan_tracking_store.record is not None:
+                        deadlines.append(next_scan_poll)
+                timeout = (
+                    max(1, min(25, int(min(deadlines) - self.clock())))
+                    if deadlines
+                    else 25
+                )
                 result = self.api(
                     "getUpdates",
                     offset=offset,
