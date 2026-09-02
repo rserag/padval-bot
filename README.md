@@ -133,6 +133,10 @@ request. Pending refreshes and failed attempts survive restarts; failures retry
 with bounded exponential backoff. Jellyfin credentials remain outside the
 repository.
 
+The same authorized private chat can send `/scan` to request an immediate
+Jellyfin library scan. The bot confirms whether Jellyfin accepted the request;
+the API key remains confined to the protected credential file.
+
 ## License
 
 No license has been selected yet. Public visibility does not grant permission
