@@ -6,6 +6,7 @@ from pathlib import Path
 from padval_bot.telegram import TelegramBot
 from padval_bot.torrent import (
     Magnet,
+    MediaRefreshSettings,
     SaveLocation,
     TorrentLocations,
     TorrentSnapshot,
@@ -14,7 +15,7 @@ from padval_bot.torrent import (
 
 
 class FakeTorrentService:
-    def __init__(self, *, tracking=False):
+    def __init__(self, *, tracking=False, media_refresh=False):
         self.locations = TorrentLocations(
             (
                 SaveLocation("movies", "Movies", "/mnt/raid1/jellyfin/media/movies"),
@@ -23,7 +24,10 @@ class FakeTorrentService:
             True,
             ("/mnt/raid1/jellyfin/media",),
             600,
-            TorrentTrackingSettings(enabled=tracking),
+            TorrentTrackingSettings(
+                enabled=tracking,
+                media_refresh=MediaRefreshSettings(enabled=media_refresh),
+            ),
         )
         self.submissions = []
         self.snapshots = ()
@@ -53,6 +57,14 @@ class FakeTorrentService:
 
     def remove_tag(self, qbit_hash, tag):
         self.removed_tags.append((qbit_hash, tag))
+
+
+class FakeJellyfinService:
+    def __init__(self):
+        self.refreshes = 0
+
+    def refresh_library(self):
+        self.refreshes += 1
 
 
 class TelegramAuthorizationTests(unittest.TestCase):
@@ -269,3 +281,58 @@ class TelegramAuthorizationTests(unittest.TestCase):
             if method == "sendMessage" and "Download complete" in params["text"]
         ]
         self.assertEqual(len(completion_messages), 1)
+
+    def test_completed_download_triggers_one_debounced_jellyfin_refresh(self):
+        self.chat.write_text("42\n", encoding="ascii")
+        service = FakeTorrentService(tracking=True, media_refresh=True)
+        jellyfin = FakeJellyfinService()
+        active = TorrentSnapshot(
+            qbit_hash="0123456789abcdef0123456789abcdef01234567",
+            name="Example Movie",
+            progress=0.5,
+            state="downloading",
+            download_speed=1048576,
+            eta=120,
+            amount_left=50,
+            size=100,
+            completion_on=0,
+            save_path="/mnt/raid1/jellyfin/media/movies",
+            tags=frozenset({"padval-bot"}),
+        )
+        service.snapshots = (active,)
+        now = [100.0]
+        bot = TelegramBot(
+            self.bot.config,
+            lambda: "ok",
+            service,
+            jellyfin,
+            wall_clock=lambda: now[0],
+        )
+        bot.api = lambda method, **params: {
+            "ok": True,
+            "result": {"message_id": 1},
+        }
+        bot._poll_tracking()
+
+        service.snapshots = (
+            TorrentSnapshot(
+                qbit_hash=active.qbit_hash,
+                name=active.name,
+                progress=1.0,
+                state="uploading",
+                download_speed=0,
+                eta=0,
+                amount_left=0,
+                size=100,
+                completion_on=200,
+                save_path=active.save_path,
+                tags=active.tags,
+            ),
+        )
+        now[0] = 200
+        bot._poll_tracking()
+        self.assertEqual(jellyfin.refreshes, 0)
+        now[0] = 260
+        bot._poll_tracking()
+        bot._poll_tracking()
+        self.assertEqual(jellyfin.refreshes, 1)

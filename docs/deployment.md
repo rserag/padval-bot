@@ -49,7 +49,24 @@ Read the pairing secret locally, send `/status SECRET` in a private chat, then
 remove the pairing file after `/var/lib/padval-bot/allowed_chat_id` appears.
 The numeric chat ID remains mode `0600` in the state directory.
 
-## 4. Configure read-only SSH
+## 4. Store the Jellyfin API key
+
+If automatic media refresh is enabled, create a dedicated Jellyfin API key for
+Padval Bot in the Jellyfin administrator dashboard. Store the raw key as one
+line in the file referenced by `jellyfin.api_key_file`, owned by root and the
+service group with mode `0640`. Do not put the key in JSON, YAML, a URL, Git,
+shell history, or a systemd environment variable.
+
+Jellyfin API keys are not narrowly permission-scoped. Treat this file as an
+administrator credential and use the private Jellyfin address rather than the
+public reverse proxy. Validate access without starting a scan:
+
+```bash
+sudo -u padval-bot /opt/padval-bot/venv/bin/padval-bot \
+  --config /etc/padval-bot/config.json --check-jellyfin
+```
+
+## 5. Configure read-only SSH
 
 Create separate keys for Linux and RouterOS monitoring. Do not reuse a personal
 administrative key. On Linux, restrict the remote account to the commands and
@@ -60,7 +77,7 @@ Populate `/etc/padval-bot/ssh/known_hosts` out of band and verify every host-key
 fingerprint before enabling the service. Padval Bot will not accept changed or
 unknown host keys automatically.
 
-## 5. Test and enable
+## 6. Test and enable
 
 Run one collection without Telegram:
 

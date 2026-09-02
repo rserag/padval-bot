@@ -34,6 +34,14 @@ class SaveLocation:
 
 
 @dataclass(frozen=True, slots=True)
+class MediaRefreshSettings:
+    enabled: bool = False
+    debounce_seconds: int = 60
+    retry_base_seconds: int = 300
+    retry_max_seconds: int = 3600
+
+
+@dataclass(frozen=True, slots=True)
 class TorrentTrackingSettings:
     enabled: bool = False
     poll_interval_seconds: int = 25
@@ -41,6 +49,7 @@ class TorrentTrackingSettings:
     notify_on_complete: bool = True
     import_incomplete_tagged_on_start: bool = True
     completed_retention_hours: int = 72
+    media_refresh: MediaRefreshSettings = field(default_factory=MediaRefreshSettings)
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +207,33 @@ def load_locations(path: str) -> TorrentLocations:
         raise TorrentError(
             "tracking.completed_retention_hours must be between 1 and 720"
         )
+    refresh_value = tracking_value.get("media_refresh", {})
+    if not isinstance(refresh_value, dict):
+        raise TorrentError("tracking.media_refresh must be an object")
+    refresh_enabled = refresh_value.get("enabled", False)
+    if not isinstance(refresh_enabled, bool):
+        raise TorrentError("tracking.media_refresh.enabled must be boolean")
+    debounce = refresh_value.get("debounce_seconds", 60)
+    if not isinstance(debounce, int) or not 0 <= debounce <= 900:
+        raise TorrentError(
+            "tracking.media_refresh.debounce_seconds must be between 0 and 900"
+        )
+    retry_base = refresh_value.get("retry_base_seconds", 300)
+    if not isinstance(retry_base, int) or not 30 <= retry_base <= 3600:
+        raise TorrentError(
+            "tracking.media_refresh.retry_base_seconds must be between 30 and 3600"
+        )
+    retry_max = refresh_value.get("retry_max_seconds", 3600)
+    if not isinstance(retry_max, int) or not retry_base <= retry_max <= 86400:
+        raise TorrentError(
+            "tracking.media_refresh.retry_max_seconds must be between the base retry and 86400"
+        )
+    media_refresh = MediaRefreshSettings(
+        enabled=refresh_enabled,
+        debounce_seconds=debounce,
+        retry_base_seconds=retry_base,
+        retry_max_seconds=retry_max,
+    )
     tracking = TorrentTrackingSettings(
         enabled=booleans["enabled"],
         poll_interval_seconds=poll_interval,
@@ -205,6 +241,7 @@ def load_locations(path: str) -> TorrentLocations:
         notify_on_complete=booleans["notify_on_complete"],
         import_incomplete_tagged_on_start=booleans["import_incomplete_tagged_on_start"],
         completed_retention_hours=retention,
+        media_refresh=media_refresh,
     )
     return TorrentLocations(
         tuple(locations), bool(custom.get("enabled")), roots, ttl, tracking

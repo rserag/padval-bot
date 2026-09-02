@@ -137,4 +137,26 @@ def load_config(path: str | Path) -> dict[str, Any]:
                         f"config.torrent.path_check_ssh.{key} must be an absolute path"
                     )
 
+    jellyfin = config.get("jellyfin")
+    if jellyfin is not None:
+        if not isinstance(jellyfin, dict):
+            raise ConfigError("config.jellyfin must be an object")
+        enabled = jellyfin.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise ConfigError("config.jellyfin.enabled must be bool")
+        if enabled:
+            base_url = _require(jellyfin, "base_url", str, "config.jellyfin")
+            if not base_url.startswith(("http://", "https://")):
+                raise ConfigError("config.jellyfin.base_url must be HTTP(S)")
+            key_file = _require(jellyfin, "api_key_file", str, "config.jellyfin")
+            if not key_file.startswith("/"):
+                raise ConfigError(
+                    "config.jellyfin.api_key_file must be an absolute path"
+                )
+            timeout = jellyfin.get("timeout_seconds", 10)
+            if not isinstance(timeout, int) or not 1 <= timeout <= 30:
+                raise ConfigError(
+                    "config.jellyfin.timeout_seconds must be between 1 and 30"
+                )
+
     return config

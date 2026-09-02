@@ -24,3 +24,9 @@ torrent:
     notify_on_complete: true
     import_incomplete_tagged_on_start: true
     completed_retention_hours: 72
+
+    media_refresh:
+      enabled: true
+      debounce_seconds: 60
+      retry_base_seconds: 300
+      retry_max_seconds: 3600

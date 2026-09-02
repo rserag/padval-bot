@@ -103,5 +103,11 @@
       "identity_file": "/etc/padval-bot/ssh/storage_ed25519",
       "known_hosts_file": "/etc/padval-bot/ssh/known_hosts"
     }
+  },
+  "jellyfin": {
+    "enabled": false,
+    "base_url": "http://203.0.113.20:8096",
+    "api_key_file": "/etc/padval-bot/jellyfin-api-key",
+    "timeout_seconds": 10
   }
 }

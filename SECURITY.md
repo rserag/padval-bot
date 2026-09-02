@@ -22,6 +22,8 @@ available. Otherwise contact the maintainer privately before sharing details.
   infrastructure information to an unauthorized recipient.
 - Keep complete magnet links out of logs and fixtures. Tracker parameters can
   contain private passkeys.
+- Keep Jellyfin API keys in protected files and authenticated headers, never in
+  query strings, configuration committed to Git, or process arguments.
 - Require custom torrent destinations to resolve below a narrow configured
   application root and verify them as the qBittorrent service account.
 
