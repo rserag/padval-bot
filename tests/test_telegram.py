@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from padval_bot.jellyfin import JellyfinError
 from padval_bot.telegram import TelegramBot
 from padval_bot.torrent import (
     Magnet,
@@ -60,11 +61,14 @@ class FakeTorrentService:
 
 
 class FakeJellyfinService:
-    def __init__(self):
+    def __init__(self, *, fail=False):
         self.refreshes = 0
+        self.fail = fail
 
     def refresh_library(self):
         self.refreshes += 1
+        if self.fail:
+            raise JellyfinError("unavailable")
 
 
 class TelegramAuthorizationTests(unittest.TestCase):
@@ -109,6 +113,63 @@ class TelegramAuthorizationTests(unittest.TestCase):
         self.bot.send(42, "<b>healthy</b>")
         self.assertEqual(calls[0][0], "sendMessage")
         self.assertEqual(calls[0][1]["parse_mode"], "HTML")
+
+    def test_manual_scan_is_authorized_and_registered(self):
+        self.chat.write_text("42\n", encoding="ascii")
+        jellyfin = FakeJellyfinService()
+        bot = TelegramBot(self.bot.config, lambda: "ok", None, jellyfin)
+        calls = []
+        bot.api = lambda method, **params: calls.append((method, params)) or {
+            "ok": True,
+            "result": {"message_id": 1},
+        }
+
+        bot.handle_update(
+            {
+                "message": {
+                    "message_id": 1,
+                    "text": "/scan",
+                    "chat": {"id": 42, "type": "private"},
+                }
+            }
+        )
+        bot.handle_update(
+            {
+                "message": {
+                    "message_id": 2,
+                    "text": "/scan",
+                    "chat": {"id": 43, "type": "private"},
+                }
+            }
+        )
+
+        self.assertEqual(jellyfin.refreshes, 1)
+        self.assertIn("scan started", calls[-1][1]["text"])
+        self.assertIn("scan", [item["command"] for item in bot._bot_commands()])
+
+    def test_manual_scan_failure_is_reported(self):
+        self.chat.write_text("42\n", encoding="ascii")
+        jellyfin = FakeJellyfinService(fail=True)
+        bot = TelegramBot(self.bot.config, lambda: "ok", None, jellyfin)
+        calls = []
+        bot.api = lambda method, **params: calls.append((method, params)) or {
+            "ok": True,
+            "result": {"message_id": 1},
+        }
+
+        with self.assertLogs("padval_bot.telegram", level="WARNING"):
+            bot.handle_update(
+                {
+                    "message": {
+                        "message_id": 1,
+                        "text": "/scan",
+                        "chat": {"id": 42, "type": "private"},
+                    }
+                }
+            )
+
+        self.assertEqual(jellyfin.refreshes, 1)
+        self.assertIn("could not be started", calls[-1][1]["text"])
 
     def test_torrent_command_uses_destination_buttons_without_echoing_magnet(self):
         self.chat.write_text("42\n", encoding="ascii")

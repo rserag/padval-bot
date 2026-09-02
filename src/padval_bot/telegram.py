@@ -755,6 +755,25 @@ class TelegramBot:
                 self.send(chat_id, "qBittorrent progress is temporarily unavailable.")
                 return
             self.send(chat_id, text, reply_markup=keyboard)
+        elif command == "/scan":
+            if self.jellyfin_service is None:
+                self.send(chat_id, "Jellyfin library scanning is not configured.")
+                return
+            try:
+                self.jellyfin_service.refresh_library()
+            except JellyfinError:
+                LOGGER.warning("Manual Jellyfin library refresh failed")
+                self.send(
+                    chat_id,
+                    "❌ Jellyfin library scan could not be started. Try /scan again.",
+                )
+            else:
+                LOGGER.info("Manual Jellyfin library refresh requested")
+                self.send(
+                    chat_id,
+                    "✅ <b>Jellyfin library scan started</b>\n"
+                    "New and changed media will appear as Jellyfin processes it.",
+                )
         elif command == "/cancel":
             if self.pending_torrents.pop(chat_id, None) is not None:
                 self.send(chat_id, "Torrent request cancelled.")
@@ -767,9 +786,11 @@ class TelegramBot:
                     "\nSend <code>/torrent &lt;magnet&gt;</code> to add a torrent."
                     "\nSend /downloads to view progress and notification settings."
                 )
+            if self.jellyfin_service is not None:
+                commands += "\nSend /scan to start a Jellyfin library scan."
             self.send(chat_id, commands)
 
-    def run_forever(self) -> None:
+    def _bot_commands(self) -> list[dict[str, str]]:
         commands = [
             {"command": "status", "description": "Full infrastructure status"},
         ]
@@ -787,10 +808,17 @@ class TelegramBot:
                     },
                 ]
             )
+        if self.jellyfin_service is not None:
+            commands.append(
+                {"command": "scan", "description": "Scan Jellyfin libraries"}
+            )
         commands.append({"command": "help", "description": "Show available commands"})
+        return commands
+
+    def run_forever(self) -> None:
         self.api(
             "setMyCommands",
-            commands=json.dumps(commands),
+            commands=json.dumps(self._bot_commands()),
         )
         if self.heartbeat_file is not None:
             self.heartbeat_file.touch()
