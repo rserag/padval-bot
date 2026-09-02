@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from padval_bot.jellyfin import JellyfinError
+from padval_bot.jellyfin import JellyfinError, LibraryScanStatus
 from padval_bot.telegram import TelegramBot
 from padval_bot.torrent import (
     Magnet,
@@ -61,14 +61,22 @@ class FakeTorrentService:
 
 
 class FakeJellyfinService:
-    def __init__(self, *, fail=False):
+    def __init__(self, *, fail=False, statuses=()):
         self.refreshes = 0
         self.fail = fail
+        self.statuses = list(statuses)
 
     def refresh_library(self):
         self.refreshes += 1
         if self.fail:
             raise JellyfinError("unavailable")
+
+    def scan_status(self):
+        if self.statuses:
+            return self.statuses.pop(0)
+        if self.refreshes:
+            return LibraryScanStatus("Running", None, "Completed", "previous")
+        return LibraryScanStatus("Idle", None, "Completed", "previous")
 
 
 class TelegramAuthorizationTests(unittest.TestCase):
@@ -107,9 +115,9 @@ class TelegramAuthorizationTests(unittest.TestCase):
 
     def test_send_uses_telegram_html(self):
         calls = []
-        self.bot.api = lambda method, **params: calls.append((method, params)) or {
-            "ok": True
-        }
+        self.bot.api = lambda method, **params: (
+            calls.append((method, params)) or {"ok": True}
+        )
         self.bot.send(42, "<b>healthy</b>")
         self.assertEqual(calls[0][0], "sendMessage")
         self.assertEqual(calls[0][1]["parse_mode"], "HTML")
@@ -119,10 +127,13 @@ class TelegramAuthorizationTests(unittest.TestCase):
         jellyfin = FakeJellyfinService()
         bot = TelegramBot(self.bot.config, lambda: "ok", None, jellyfin)
         calls = []
-        bot.api = lambda method, **params: calls.append((method, params)) or {
-            "ok": True,
-            "result": {"message_id": 1},
-        }
+        bot.api = lambda method, **params: (
+            calls.append((method, params))
+            or {
+                "ok": True,
+                "result": {"message_id": 1},
+            }
+        )
 
         bot.handle_update(
             {
@@ -144,18 +155,23 @@ class TelegramAuthorizationTests(unittest.TestCase):
         )
 
         self.assertEqual(jellyfin.refreshes, 1)
-        self.assertIn("scan started", calls[-1][1]["text"])
+        self.assertIn("Jellyfin library scan", calls[-1][1]["text"])
+        self.assertIn("Refresh status", calls[-1][1]["reply_markup"])
         self.assertIn("scan", [item["command"] for item in bot._bot_commands()])
+        self.assertIn("scanstatus", [item["command"] for item in bot._bot_commands()])
 
     def test_manual_scan_failure_is_reported(self):
         self.chat.write_text("42\n", encoding="ascii")
         jellyfin = FakeJellyfinService(fail=True)
         bot = TelegramBot(self.bot.config, lambda: "ok", None, jellyfin)
         calls = []
-        bot.api = lambda method, **params: calls.append((method, params)) or {
-            "ok": True,
-            "result": {"message_id": 1},
-        }
+        bot.api = lambda method, **params: (
+            calls.append((method, params))
+            or {
+                "ok": True,
+                "result": {"message_id": 1},
+            }
+        )
 
         with self.assertLogs("padval_bot.telegram", level="WARNING"):
             bot.handle_update(
@@ -171,15 +187,161 @@ class TelegramAuthorizationTests(unittest.TestCase):
         self.assertEqual(jellyfin.refreshes, 1)
         self.assertIn("could not be started", calls[-1][1]["text"])
 
+    def test_scan_progress_edits_one_message_and_notifies_on_completion(self):
+        self.chat.write_text("42\n", encoding="ascii")
+        jellyfin = FakeJellyfinService(
+            statuses=(
+                LibraryScanStatus("Idle", None, "Completed", "old-end"),
+                LibraryScanStatus("Running", 12.5, "Completed", "old-end"),
+                LibraryScanStatus("Running", 73.2, "Completed", "old-end"),
+                LibraryScanStatus("Idle", None, "Completed", "new-end"),
+            )
+        )
+        now = [100.0]
+        bot = TelegramBot(
+            self.bot.config,
+            lambda: "ok",
+            None,
+            jellyfin,
+            wall_clock=lambda: now[0],
+        )
+        calls = []
+        bot.api = lambda method, **params: (
+            calls.append((method, params))
+            or {
+                "ok": True,
+                "result": {"message_id": 77},
+            }
+        )
+
+        bot.handle_update(
+            {
+                "message": {
+                    "message_id": 1,
+                    "text": "/scan",
+                    "chat": {"id": 42, "type": "private"},
+                }
+            }
+        )
+        now[0] = 110
+        bot._update_scan_tracking()
+        now[0] = 120
+        bot._update_scan_tracking()
+
+        edits = [params for method, params in calls if method == "editMessageText"]
+        self.assertEqual({params["message_id"] for params in edits}, {77})
+        self.assertIn("73.2%", edits[-2]["text"])
+        self.assertIn("scan completed", edits[-1]["text"])
+        self.assertIsNone(bot.scan_tracking_store.record)
+        self.assertFalse(
+            (Path(self.directory.name) / "state/jellyfin-scan-tracking.json").exists()
+        )
+
+    def test_scanstatus_follows_scan_started_elsewhere(self):
+        self.chat.write_text("42\n", encoding="ascii")
+        jellyfin = FakeJellyfinService(
+            statuses=(LibraryScanStatus("Running", 48.0, "Completed", "old-end"),)
+        )
+        bot = TelegramBot(self.bot.config, lambda: "ok", None, jellyfin)
+        calls = []
+        bot.api = lambda method, **params: (
+            calls.append((method, params))
+            or {
+                "ok": True,
+                "result": {"message_id": 88},
+            }
+        )
+
+        bot.handle_update(
+            {
+                "message": {
+                    "message_id": 1,
+                    "text": "/scanstatus",
+                    "chat": {"id": 42, "type": "private"},
+                }
+            }
+        )
+
+        self.assertIn("48.0%", calls[-1][1]["text"])
+        self.assertEqual(bot.scan_tracking_store.record.message_id, 88)
+
+    def test_scan_refresh_button_updates_the_tracked_message(self):
+        self.chat.write_text("42\n", encoding="ascii")
+        jellyfin = FakeJellyfinService(
+            statuses=(LibraryScanStatus("Running", 62.0, "Completed", "old-end"),)
+        )
+        bot = TelegramBot(self.bot.config, lambda: "ok", None, jellyfin)
+        bot.scan_tracking_store.start(
+            chat_id=42,
+            message_id=88,
+            requested_at=100,
+            triggered_by_bot=True,
+            baseline_last_execution_end="old-end",
+            observed_running=True,
+        )
+        calls = []
+        bot.api = lambda method, **params: (
+            calls.append((method, params)) or {"ok": True, "result": {}}
+        )
+
+        bot.handle_update(
+            {
+                "callback_query": {
+                    "id": "scan-refresh-1",
+                    "data": "jfscan:refresh",
+                    "message": {
+                        "message_id": 88,
+                        "chat": {"id": 42, "type": "private"},
+                    },
+                }
+            }
+        )
+
+        edit = next(params for method, params in calls if method == "editMessageText")
+        self.assertEqual(edit["message_id"], 88)
+        self.assertIn("62.0%", edit["text"])
+        self.assertTrue(any(method == "answerCallbackQuery" for method, _ in calls))
+
+    def test_fast_scan_is_detected_from_new_execution_result(self):
+        self.chat.write_text("42\n", encoding="ascii")
+        jellyfin = FakeJellyfinService(
+            statuses=(
+                LibraryScanStatus("Idle", None, "Completed", "old-end"),
+                LibraryScanStatus("Idle", None, "Completed", "new-end"),
+            )
+        )
+        bot = TelegramBot(self.bot.config, lambda: "ok", None, jellyfin)
+        calls = []
+        bot.api = lambda method, **params: (
+            calls.append((method, params)) or {"ok": True, "result": {"message_id": 91}}
+        )
+
+        bot.handle_update(
+            {
+                "message": {
+                    "message_id": 1,
+                    "text": "/scan",
+                    "chat": {"id": 42, "type": "private"},
+                }
+            }
+        )
+
+        edits = [params for method, params in calls if method == "editMessageText"]
+        self.assertIn("scan completed", edits[-1]["text"])
+        self.assertIsNone(bot.scan_tracking_store.record)
+
     def test_torrent_command_uses_destination_buttons_without_echoing_magnet(self):
         self.chat.write_text("42\n", encoding="ascii")
         service = FakeTorrentService()
         bot = TelegramBot(self.bot.config, lambda: "ok", service)
         calls = []
-        bot.api = lambda method, **params: calls.append((method, params)) or {
-            "ok": True,
-            "result": {"message_id": 10},
-        }
+        bot.api = lambda method, **params: (
+            calls.append((method, params))
+            or {
+                "ok": True,
+                "result": {"message_id": 10},
+            }
+        )
         private_magnet = (
             "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
             "&tr=https://tracker.example/private-passkey"
@@ -302,10 +464,13 @@ class TelegramAuthorizationTests(unittest.TestCase):
             wall_clock=lambda: 100,
         )
         calls = []
-        bot.api = lambda method, **params: calls.append((method, params)) or {
-            "ok": True,
-            "result": {"message_id": len(calls)},
-        }
+        bot.api = lambda method, **params: (
+            calls.append((method, params))
+            or {
+                "ok": True,
+                "result": {"message_id": len(calls)},
+            }
+        )
         bot.handle_update(
             {
                 "message": {

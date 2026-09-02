@@ -134,8 +134,13 @@ with bounded exponential backoff. Jellyfin credentials remain outside the
 repository.
 
 The same authorized private chat can send `/scan` to request an immediate
-Jellyfin library scan. The bot confirms whether Jellyfin accepted the request;
-the API key remains confined to the protected credential file.
+Jellyfin library scan. One Telegram message follows the scheduled task with a
+progress bar when Jellyfin reports a percentage, elapsed time, and a manual
+Refresh status button. It is edited automatically every ten seconds and turns
+into a completion or failure notification when the scan finishes. `/scanstatus`
+checks the current task and starts following it if another Jellyfin client
+started it. Active scan-message state is restart-safe and contains no API key
+or media details; the key remains confined to the protected credential file.
 
 ## License
 
