@@ -130,6 +130,14 @@ followed by the other shows in their usual order. These shortcuts survive bot
 restarts; removed show folders are omitted. Browsing or cancelling does not
 change the recent list. Only the two folder names are saved in the private
 runtime file `tv-recent-shows.json` (mode `0600`), without magnets or tracker URLs.
+After a successful TV submission, **Add another episode** asks for a new magnet
+and sends it directly to the same show and season, with no repeat selection or
+confirmation. The prompt displays the destination, validates the new magnet,
+and rechecks folder safety before each submission. Each successful episode
+offers the button again. Reply to the prompt within ten minutes, or use
+`/cancel`; starting a new `/torrent` request also cancels that prompt. Only the
+latest successful TV submission's shortcut is active, and shortcuts expire
+when the bot restarts. No previous magnet is retained for this feature.
 The bot shows the full destination and waits for **Download** before creating
 any missing folders or submitting the magnet. An existing season folder is
 reused when its number matches, including older names such as

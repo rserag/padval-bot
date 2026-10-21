@@ -44,6 +44,15 @@ class PendingTorrent:
     tv: TVSelection | None = None
 
 
+@dataclass(slots=True)
+class NextTVEpisode:
+    request_id: str
+    show: str
+    season: str
+    prompt_message_id: int | None = None
+    prompted_at: float = 0
+
+
 class TelegramBot:
     SCAN_POLL_INTERVAL_SECONDS = 10
 
@@ -75,6 +84,7 @@ class TelegramBot:
         self.clock = clock
         self.wall_clock = wall_clock
         self.pending_torrents: dict[int, PendingTorrent] = {}
+        self.next_tv_episodes: dict[int, NextTVEpisode] = {}
         self.recent_tv_shows = RecentTVShows(self.state_dir / "tv-recent-shows.json")
         self.tracking_store = (
             TrackingStore(
@@ -455,6 +465,9 @@ class TelegramBot:
             self.send(chat_id, html.escape(str(exc)))
             return
         request_id = secrets.token_hex(4)
+        repeat = self.next_tv_episodes.get(chat_id)
+        if repeat is not None:
+            repeat.prompt_message_id = None
         self.pending_torrents[chat_id] = PendingTorrent(
             request_id, magnet, self.clock()
         )
@@ -722,6 +735,98 @@ class TelegramBot:
             raise
         return True
 
+    def _prompt_next_episode(self, chat_id: int, repeat: NextTVEpisode) -> None:
+        prompt_id = self.send(
+            chat_id,
+            "Reply with the next episode's magnet to download it to:\n"
+            f"<b>{html.escape(repeat.show)} / {html.escape(repeat.season)}</b>\n"
+            "It will start in this folder without repeating show/season selection.\n"
+            "Use /cancel to cancel.",
+            reply_markup={"force_reply": True, "selective": True},
+        )
+        repeat.prompt_message_id = prompt_id
+        repeat.prompted_at = self.clock()
+        self.pending_torrents.pop(chat_id, None)
+
+    def _handle_next_episode_callback(self, callback: dict[str, Any]) -> bool:
+        data = callback.get("data")
+        if not isinstance(data, str) or not data.startswith("tvnext:"):
+            return False
+        message = callback.get("message")
+        callback_id = callback.get("id")
+        if not isinstance(message, dict) or not isinstance(callback_id, str):
+            return True
+        chat = message.get("chat")
+        if not isinstance(chat, dict) or not self.authorize(chat, []):
+            return True
+        chat_id = int(chat["id"])
+        repeat = self.next_tv_episodes.get(chat_id)
+        if (
+            self.torrent_service is None
+            or repeat is None
+            or data != f"tvnext:{repeat.request_id}"
+        ):
+            self.api(
+                "answerCallbackQuery",
+                callback_query_id=callback_id,
+                text="Shortcut expired. Start with /torrent again.",
+            )
+            return True
+        self.api("answerCallbackQuery", callback_query_id=callback_id)
+        self._prompt_next_episode(chat_id, repeat)
+        return True
+
+    def _handle_next_episode_reply(
+        self, message: dict[str, Any], chat: dict[str, Any], text: str
+    ) -> bool:
+        if self.torrent_service is None or not self.authorize(chat, []):
+            return False
+        chat_id = int(chat["id"])
+        repeat = self.next_tv_episodes.get(chat_id)
+        reply = message.get("reply_to_message")
+        if (
+            repeat is None
+            or repeat.prompt_message_id is None
+            or not isinstance(reply, dict)
+            or reply.get("message_id") != repeat.prompt_message_id
+            or text.startswith("/")
+        ):
+            return False
+        if (
+            self.clock() - repeat.prompted_at
+            > self.torrent_service.locations.pending_ttl_seconds
+        ):
+            repeat.prompt_message_id = None
+            self.send(
+                chat_id, "The magnet prompt expired. Tap Add another episode again."
+            )
+            return True
+        try:
+            magnet = self.torrent_service.validate_magnet(text)
+            path = self.torrent_service.prepare_tv_destination(
+                repeat.show, repeat.season
+            )
+        except TorrentError as exc:
+            self.send(chat_id, "❌ " + html.escape(str(exc)))
+            self._prompt_next_episode(chat_id, repeat)
+            return True
+        pending = PendingTorrent(
+            secrets.token_hex(4),
+            magnet,
+            self.clock(),
+            tv=TVSelection(stage="confirm", show=repeat.show, season=repeat.season),
+        )
+        # Consume the prompt before submission so a replay cannot add it twice.
+        repeat.prompt_message_id = None
+        self._submit_torrent(
+            chat_id,
+            pending,
+            path,
+            "TV / " + repeat.show + " / " + repeat.season,
+            flat_layout=True,
+        )
+        return True
+
     def _submit_torrent(
         self,
         chat_id: int,
@@ -772,6 +877,26 @@ class TelegramBot:
             if len(display_hash) <= 16
             else f"{display_hash[:8]}…{display_hash[-8:]}"
         )
+        rows = []
+        if (
+            flat_layout
+            and pending.tv is not None
+            and pending.tv.show is not None
+            and pending.tv.season is not None
+        ):
+            self.next_tv_episodes[chat_id] = NextTVEpisode(
+                pending.request_id, pending.tv.show, pending.tv.season
+            )
+            rows.append(
+                [
+                    {
+                        "text": "Add another episode",
+                        "callback_data": f"tvnext:{pending.request_id}",
+                    }
+                ]
+            )
+        if tracking:
+            rows.append([{"text": "View downloads", "callback_data": "dl:list"}])
         self.send(
             chat_id,
             "✅ Added to qBittorrent\n"
@@ -782,15 +907,7 @@ class TelegramBot:
                 if tracking
                 else "Progress tracking is unavailable for this request."
             ),
-            reply_markup=(
-                {
-                    "inline_keyboard": [
-                        [{"text": "View downloads", "callback_data": "dl:list"}]
-                    ]
-                }
-                if tracking
-                else None
-            ),
+            reply_markup={"inline_keyboard": rows} if rows else None,
         )
 
     def _handle_download_callback(self, callback: dict[str, Any]) -> bool:
@@ -1104,6 +1221,8 @@ class TelegramBot:
         return True
 
     def _handle_callback(self, callback: dict[str, Any]) -> None:
+        if self._handle_next_episode_callback(callback):
+            return
         if self._handle_scan_callback(callback):
             return
         if self._handle_download_callback(callback):
@@ -1307,6 +1426,8 @@ class TelegramBot:
         chat = message.get("chat")
         if not isinstance(text, str) or not isinstance(chat, dict):
             return
+        if self._handle_next_episode_reply(message, chat, text.strip()):
+            return
         if self._handle_tv_reply(message, chat, text.strip()):
             return
         if self._handle_custom_path(message, chat, text.strip()):
@@ -1344,7 +1465,11 @@ class TelegramBot:
         elif command == "/scanstatus":
             self._scan_status(chat_id)
         elif command == "/cancel":
-            if self.pending_torrents.pop(chat_id, None) is not None:
+            repeat = self.next_tv_episodes.get(chat_id)
+            had_repeat = repeat is not None and repeat.prompt_message_id is not None
+            if repeat is not None:
+                repeat.prompt_message_id = None
+            if self.pending_torrents.pop(chat_id, None) is not None or had_repeat:
                 self.send(chat_id, "Torrent request cancelled.")
             else:
                 self.send(chat_id, "There is no pending torrent request.")

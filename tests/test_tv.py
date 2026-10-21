@@ -414,6 +414,105 @@ class TVWorkflowTests(unittest.TestCase):
             self.click("Download")
         self.assertEqual(self.bot.recent_tv_shows.names, ())
 
+    def next_episode_reply(self, text, *, prompt=None, chat_id=42):
+        if prompt is None:
+            prompt = self.bot.next_tv_episodes[42].prompt_message_id
+        self.message(text, reply=prompt, chat_id=chat_id)
+
+    def test_add_another_episode_reuses_show_and_season_repeatedly(self):
+        self.choose_existing()
+        self.click("Download")
+        first_shortcut = self.button("Add another episode")
+        for number in (1, 2):
+            self.click("Add another episode")
+            prompt = self.bot.next_tv_episodes[42].prompt_message_id
+            self.next_episode_reply("magnet:?xt=urn:btih:" + str(number) * 40)
+            self.next_episode_reply(
+                "magnet:?xt=urn:btih:" + str(number) * 40, prompt=prompt
+            )
+        self.assertEqual(self.urlopen.call_count, 3)
+        destination = str(self.tv / self.show / "Season 01").encode()
+        for call in self.urlopen.call_args_list:
+            self.assertIn(destination, call.args[0].data)
+            self.assertIn(b"NoSubfolder", call.args[0].data)
+        self.assertEqual(len(self.bot.tracking_store.records), 3)
+        self.callback(first_shortcut)
+        self.assertIsNone(self.bot.next_tv_episodes[42].prompt_message_id)
+        self.assertIn("Shortcut expired", self.calls[-1][1]["text"])
+
+    def test_next_episode_invalid_magnet_reprompts_without_submitting(self):
+        self.choose_existing()
+        self.click("Download")
+        self.click("Add another episode")
+        old_prompt = self.bot.next_tv_episodes[42].prompt_message_id
+        self.next_episode_reply("not a magnet")
+        self.assertEqual(self.urlopen.call_count, 1)
+        self.assertNotEqual(self.bot.next_tv_episodes[42].prompt_message_id, old_prompt)
+        self.next_episode_reply("magnet:?xt=urn:btih:" + "1" * 40)
+        self.assertEqual(self.urlopen.call_count, 2)
+
+    def test_next_episode_prompt_is_bound_to_reply_chat_and_timeout(self):
+        self.choose_existing()
+        self.click("Download")
+        self.callback(self.button("Add another episode"), chat_id=43)
+        self.assertIsNone(self.bot.next_tv_episodes[42].prompt_message_id)
+        self.click("Add another episode")
+        self.next_episode_reply("magnet:?xt=urn:btih:" + "1" * 40, prompt=-1)
+        self.next_episode_reply("magnet:?xt=urn:btih:" + "1" * 40, chat_id=43)
+        self.assertEqual(self.urlopen.call_count, 1)
+        self.now += 601
+        self.next_episode_reply("magnet:?xt=urn:btih:" + "1" * 40)
+        self.assertEqual(self.urlopen.call_count, 1)
+        self.assertIsNone(self.bot.next_tv_episodes[42].prompt_message_id)
+
+    def test_cancel_or_new_torrent_invalidates_next_episode_prompt(self):
+        self.choose_existing()
+        self.click("Download")
+        self.click("Add another episode")
+        prompt = self.bot.next_tv_episodes[42].prompt_message_id
+        self.next_episode_reply("/cancel")
+        self.assertIn("cancelled", self.sent_text()[-1])
+        self.next_episode_reply("magnet:?xt=urn:btih:" + "1" * 40, prompt=prompt)
+        self.click("Add another episode")
+        prompt = self.bot.next_tv_episodes[42].prompt_message_id
+        self.message("/torrent magnet:?xt=urn:btih:" + "2" * 40)
+        self.next_episode_reply("magnet:?xt=urn:btih:" + "1" * 40, prompt=prompt)
+        self.assertEqual(self.urlopen.call_count, 1)
+        self.assertIn(42, self.bot.pending_torrents)
+
+    def test_next_episode_rechecks_destination_before_submission(self):
+        self.choose_existing()
+        self.click("Download")
+        self.click("Add another episode")
+        with mock.patch.object(
+            self.service,
+            "prepare_tv_destination",
+            side_effect=TorrentError("Unavailable"),
+        ):
+            self.next_episode_reply("magnet:?xt=urn:btih:" + "1" * 40)
+        self.assertEqual(self.urlopen.call_count, 1)
+        self.assertIsNotNone(self.bot.next_tv_episodes[42].prompt_message_id)
+
+    def test_movies_do_not_offer_episode_shortcut(self):
+        self.click("Back")
+        self.click("Movies")
+        markup = json.loads(self.calls[-1][1]["reply_markup"])
+        self.assertFalse(
+            any(
+                button["text"] == "Add another episode"
+                for row in markup["inline_keyboard"]
+                for button in row
+            )
+        )
+
+    def test_episode_shortcut_is_available_without_tracking(self):
+        self.bot.tracking_store = None
+        self.choose_existing()
+        self.click("Download")
+        self.click("Add another episode")
+        self.next_episode_reply("magnet:?xt=urn:btih:" + "1" * 40)
+        self.assertEqual(self.urlopen.call_count, 2)
+
 
 class RecentTVShowsTests(unittest.TestCase):
     def setUp(self):
