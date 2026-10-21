@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -28,6 +29,7 @@ from .torrent import (
     TorrentSubmissionUncertain,
 )
 from .tracking import TrackingStateError, TrackingStore
+from .tv import TVSelection, season_name, valid_component
 
 
 LOGGER = logging.getLogger(__name__)
@@ -39,6 +41,7 @@ class PendingTorrent:
     magnet: Magnet
     created_at: float
     custom_prompt_message_id: int | None = None
+    tv: TVSelection | None = None
 
 
 class TelegramBot:
@@ -481,12 +484,247 @@ class TelegramBot:
             return False
         return True
 
+    def _tv_options(
+        self, chat_id: int, pending: PendingTorrent, *, page: int = 0
+    ) -> None:
+        selection = pending.tv
+        if selection is None or self.torrent_service is None:
+            return
+        is_shows = selection.stage == "shows"
+        options = self.torrent_service.list_tv_folders(
+            None if is_shows else selection.show
+        )
+        page = max(0, min(page, max(0, (len(options) - 1) // 8)))
+        nonce = secrets.token_hex(3)
+
+        def button(label: str, action: str) -> dict[str, str]:
+            return {
+                "text": label,
+                "callback_data": f"torrent:{pending.request_id}:tv-{nonce}-{action}",
+            }
+
+        rows = [
+            [button(name[:60], f"pick{index}")]
+            for index, name in enumerate(options)
+            if page * 8 <= index < (page + 1) * 8
+        ]
+        navigation = []
+        if page > 0:
+            navigation.append(button("Previous", f"page{page - 1}"))
+        if (page + 1) * 8 < len(options):
+            navigation.append(button("Next", f"page{page + 1}"))
+        if navigation:
+            rows.append(navigation)
+        rows.append([button("New show" if is_shows else "New season", "new")])
+        rows.append([button("Back", "back"), button("Cancel", "cancel")])
+        title = (
+            "Choose a TV show folder, or create a new show."
+            if is_shows
+            else f"Choose a season for <b>{html.escape(selection.show or '')}</b>."
+        )
+        if not options:
+            title += "\nNo existing folders found."
+        if len(options) > 8:
+            title += f"\nPage {page + 1} of {(len(options) + 7) // 8}"
+        self.send(chat_id, title, reply_markup={"inline_keyboard": rows})
+        selection.options = options
+        selection.nonce = nonce
+        selection.prompt_message_id = None
+
+    def _tv_confirm(self, chat_id: int, pending: PendingTorrent) -> None:
+        selection = pending.tv
+        if (
+            selection is None
+            or selection.show is None
+            or selection.season is None
+            or self.torrent_service is None
+        ):
+            return
+        path = self.torrent_service.tv_destination(selection.show, selection.season)
+        nonce = secrets.token_hex(3)
+        self.send(
+            chat_id,
+            "<b>Confirm TV episode download</b>\n"
+            f"Show: {html.escape(selection.show)}\n"
+            f"Season: {html.escape(selection.season)}\n"
+            f"Destination: <code>{html.escape(path)}</code>\n\n"
+            "Missing show and season folders will be created when you tap Download.",
+            reply_markup={
+                "inline_keyboard": [
+                    [
+                        {
+                            "text": "Download",
+                            "callback_data": f"torrent:{pending.request_id}:tv-{nonce}-confirm",
+                        }
+                    ],
+                    [
+                        {
+                            "text": "Change season",
+                            "callback_data": f"torrent:{pending.request_id}:tv-{nonce}-back",
+                        },
+                        {
+                            "text": "Cancel",
+                            "callback_data": f"torrent:{pending.request_id}:tv-{nonce}-cancel",
+                        },
+                    ],
+                ]
+            },
+        )
+        selection.stage = "confirm"
+        selection.nonce = nonce
+        selection.prompt_message_id = None
+
+    def _tv_prompt(self, chat_id: int, selection: TVSelection) -> None:
+        is_show = selection.stage == "new_show"
+        prompt_id = self.send(
+            chat_id,
+            (
+                "Reply with the show folder name, for example Severance (2022)."
+                if is_show
+                else "Reply with the season number, for example 2. Use 0 for Specials."
+            )
+            + "\nUse /cancel to cancel.",
+            reply_markup={"force_reply": True, "selective": True},
+        )
+        selection.prompt_message_id = prompt_id
+        selection.nonce = ""
+
+    def _tv_callback(self, chat_id: int, pending: PendingTorrent, choice: str) -> None:
+        selection = pending.tv
+        if selection is None or self.torrent_service is None:
+            return
+        parts = choice.split("-", 2)
+        if len(parts) != 3 or not selection.nonce or parts[1] != selection.nonce:
+            self.send(
+                chat_id, "That TV selection has been replaced. Use the newest buttons."
+            )
+            return
+        action = parts[2]
+        if action == "cancel":
+            self.pending_torrents.pop(chat_id, None)
+            self.send(chat_id, "Torrent request cancelled.")
+        elif action == "back":
+            if selection.stage == "shows":
+                self.send(
+                    chat_id,
+                    "Where should this torrent be saved?",
+                    reply_markup=self._torrent_keyboard(pending.request_id),
+                )
+                pending.tv = None
+            else:
+                selection.stage = "seasons" if selection.stage == "confirm" else "shows"
+                selection.season = None
+                self._tv_options(chat_id, pending)
+        elif action == "confirm" and selection.stage == "confirm":
+            if selection.show is None or selection.season is None:
+                return
+            path = self.torrent_service.prepare_tv_destination(
+                selection.show, selection.season
+            )
+            self._submit_torrent(
+                chat_id,
+                pending,
+                path,
+                "TV / " + selection.show + " / " + selection.season,
+                flat_layout=True,
+            )
+        elif selection.stage in {"shows", "seasons"}:
+            if action == "new":
+                selection.stage = (
+                    "new_show" if selection.stage == "shows" else "new_season"
+                )
+                self._tv_prompt(chat_id, selection)
+            elif re.fullmatch(r"page[0-9]{1,3}", action):
+                self._tv_options(chat_id, pending, page=int(action[4:]))
+            elif re.fullmatch(r"pick[0-9]{1,3}", action):
+                index = int(action[4:])
+                if index >= len(selection.options):
+                    return
+                if selection.stage == "shows":
+                    selection.show = selection.options[index]
+                    selection.stage = "seasons"
+                    self._tv_options(chat_id, pending)
+                else:
+                    selection.season = selection.options[index]
+                    self._tv_confirm(chat_id, pending)
+
+    def _handle_tv_reply(
+        self, message: dict[str, Any], chat: dict[str, Any], text: str
+    ) -> bool:
+        if self.torrent_service is None or not self.authorize(chat, []):
+            return False
+        chat_id = int(chat["id"])
+        pending = self._expire_pending(chat_id)
+        selection = pending.tv if pending is not None else None
+        reply = message.get("reply_to_message")
+        if (
+            selection is None
+            or selection.prompt_message_id is None
+            or not isinstance(reply, dict)
+            or reply.get("message_id") != selection.prompt_message_id
+        ):
+            return False
+        # Commands must still reach the command dispatcher, including /cancel.
+        if text.startswith("/"):
+            return False
+        previous = deepcopy(selection)
+        try:
+            if selection.stage == "new_show":
+                if not valid_component(text):
+                    raise TorrentError(
+                        "Use a show name without slashes or control characters (up to 200 bytes)."
+                    )
+                selection.show = text
+                selection.stage = "seasons"
+                self._tv_options(chat_id, pending)
+            elif selection.stage == "new_season":
+                try:
+                    selection.season = season_name(text)
+                except ValueError as exc:
+                    raise TorrentError(str(exc)) from exc
+                # Reuse existing Season 2 / Season 02 folders instead of making
+                # a duplicate when a season number is entered manually.
+                number = int(selection.season.split()[1])
+                existing = self.torrent_service.list_tv_folders(selection.show)
+                matches = [
+                    name
+                    for name in existing
+                    if (
+                        (number == 0 and name.casefold() == "specials")
+                        or re.match(rf"^Season[ ._-]*0*{number}\b", name, re.IGNORECASE)
+                    )
+                ]
+                if len(matches) > 1:
+                    selection.stage = "seasons"
+                    self.send(
+                        chat_id,
+                        "Several folders match that season. Choose an existing folder.",
+                    )
+                    self._tv_options(chat_id, pending)
+                    return True
+                if matches:
+                    selection.season = matches[0]
+                self._tv_confirm(chat_id, pending)
+        except TorrentError as exc:
+            pending.tv = previous
+            self.send(
+                chat_id, "❌ " + html.escape(str(exc)) + " Reply again or use /cancel."
+            )
+            if previous.stage in {"new_show", "new_season"}:
+                self._tv_prompt(chat_id, previous)
+        except (OSError, RuntimeError, ValueError):
+            pending.tv = previous
+            raise
+        return True
+
     def _submit_torrent(
         self,
         chat_id: int,
         pending: PendingTorrent,
         save_path: str,
         destination_label: str,
+        *,
+        flat_layout: bool = False,
     ) -> None:
         if self.torrent_service is None:
             raise RuntimeError("torrent service is unavailable")
@@ -499,12 +737,15 @@ class TelegramBot:
         )
         try:
             self.api("sendChatAction", chat_id=chat_id, action="typing")
-            if tracking_tag is None:
-                self.torrent_service.submit(pending.magnet, save_path)
-            else:
-                self.torrent_service.submit(
-                    pending.magnet, save_path, tracking_tag=tracking_tag
-                )
+        except (OSError, RuntimeError, ValueError):
+            pass
+        try:
+            options: dict[str, Any] = {}
+            if tracking_tag is not None:
+                options["tracking_tag"] = tracking_tag
+            if flat_layout:
+                options["flat_layout"] = True
+            self.torrent_service.submit(pending.magnet, save_path, **options)
         except TorrentSubmissionUncertain as exc:
             tracking = self._register_tracking(
                 chat_id, pending, destination_label, tracking_tag
@@ -888,6 +1129,18 @@ class TelegramBot:
             )
             return
         choice = parts[2]
+        if choice.startswith("tv-"):
+            self.api("answerCallbackQuery", callback_query_id=callback_id)
+            previous = deepcopy(pending.tv)
+            try:
+                self._tv_callback(chat_id, pending, choice)
+            except TorrentError as exc:
+                pending.tv = previous
+                self.send(chat_id, "❌ " + html.escape(str(exc)))
+            except (OSError, RuntimeError, ValueError):
+                pending.tv = previous
+                raise
+            return
         if choice == "cancel":
             self.pending_torrents.pop(chat_id, None)
             self.api(
@@ -907,6 +1160,7 @@ class TelegramBot:
                 },
             )
             pending.custom_prompt_message_id = prompt_id
+            pending.tv = None
             return
         if self.torrent_service is None:
             raise RuntimeError("torrent service is unavailable")
@@ -921,8 +1175,24 @@ class TelegramBot:
         self.api(
             "answerCallbackQuery",
             callback_query_id=callback_id,
-            text=f"Adding to {location.label}",
+            text="Choose show and season"
+            if location.kind == "tv"
+            else f"Adding to {location.label}",
         )
+        if location.kind == "tv":
+            previous = deepcopy(pending.tv)
+            pending.tv = TVSelection()
+            try:
+                self._tv_options(chat_id, pending)
+            except TorrentError as exc:
+                pending.tv = previous
+                self.send(chat_id, "❌ " + html.escape(str(exc)))
+            except (OSError, RuntimeError, ValueError):
+                pending.tv = previous
+                raise
+            else:
+                pending.custom_prompt_message_id = None
+            return
         self._submit_torrent(chat_id, pending, location.path, location.label)
 
     def _handle_custom_path(
@@ -1030,6 +1300,8 @@ class TelegramBot:
         chat = message.get("chat")
         if not isinstance(text, str) or not isinstance(chat, dict):
             return
+        if self._handle_tv_reply(message, chat, text.strip()):
+            return
         if self._handle_custom_path(message, chat, text.strip()):
             return
         if not text.startswith("/"):
@@ -1126,6 +1398,8 @@ class TelegramBot:
         next_scan_poll = 0.0
         while True:
             try:
+                for chat_id in tuple(self.pending_torrents):
+                    self._expire_pending(chat_id)
                 deadlines: list[float] = []
                 if self.tracking_store is not None and self.torrent_service is not None:
                     now = self.clock()

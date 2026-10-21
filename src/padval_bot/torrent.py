@@ -17,6 +17,8 @@ from typing import Any
 
 import yaml
 
+from .tv import TV_STORAGE_SCRIPT, valid_component
+
 
 class TorrentError(ValueError):
     """Raised when a torrent request is invalid or cannot be completed."""
@@ -31,6 +33,7 @@ class SaveLocation:
     id: str
     label: str
     path: str
+    kind: str = "directory"
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,7 +182,12 @@ def load_locations(path: str) -> TorrentLocations:
             raise TorrentError("save location ids and paths must be unique")
         seen_ids.add(location_id)
         seen_paths.add(location_path)
-        locations.append(SaveLocation(location_id, label, location_path))
+        kind = row.get("kind", "directory")
+        if not isinstance(kind, str) or kind not in {"directory", "tv"}:
+            raise TorrentError("save location kind must be directory or tv")
+        if kind == "tv" and any(item.kind == "tv" for item in locations):
+            raise TorrentError("only one TV location may be configured")
+        locations.append(SaveLocation(location_id, label, location_path, kind))
 
     ttl = torrent.get("pending_request_ttl_seconds", 600)
     if not isinstance(ttl, int) or not 60 <= ttl <= 3600:
@@ -343,9 +351,9 @@ class TorrentService:
             raise TorrentError("That path is outside the configured media folders.")
         return path
 
-    def _ssh_command(self) -> list[str]:
+    def _ssh_command(self, script: str = PATH_CHECK_SCRIPT) -> list[str]:
         ssh = self.config["path_check_ssh"]
-        encoded = base64.b64encode(PATH_CHECK_SCRIPT.encode("utf-8")).decode("ascii")
+        encoded = base64.b64encode(script.encode("utf-8")).decode("ascii")
         remote = f"python3 -c {shlex.quote(f'import base64;exec(base64.b64decode({encoded!r}))')}"
         return [
             "ssh",
@@ -398,6 +406,81 @@ class TorrentService:
     def preflight(self) -> None:
         for location in self.locations.save_locations:
             self.check_path(location.path)
+
+    @property
+    def tv_location(self) -> SaveLocation:
+        location = next(
+            (item for item in self.locations.save_locations if item.kind == "tv"),
+            None,
+        )
+        if location is None:
+            raise TorrentError("TV show selection is not configured.")
+        return location
+
+    def tv_destination(self, show: str, season: str) -> str:
+        if not valid_component(show) or not valid_component(season):
+            raise TorrentError(
+                "Use a folder name without slashes or control characters."
+            )
+        return str(PurePosixPath(self.tv_location.path) / show / season)
+
+    def _tv_request(
+        self, action: str, *, show: str | None = None, season: str | None = None
+    ) -> dict[str, Any]:
+        if show is not None and not valid_component(show):
+            raise TorrentError("Invalid TV show folder name.")
+        if season is not None and not valid_component(season):
+            raise TorrentError("Invalid season folder name.")
+        request = {
+            "root": self.tv_location.path,
+            "roots": list(self.locations.allowed_roots),
+            "action": action,
+            "show": show,
+            "season": season,
+        }
+        try:
+            process = subprocess.run(
+                self._ssh_command(TV_STORAGE_SCRIPT),
+                input=json.dumps(request),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=12,
+                check=False,
+            )
+            result = (
+                json.loads(process.stdout)
+                if process.returncode == 0 and len(process.stdout) <= 1024 * 1024
+                else None
+            )
+        except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+            raise TorrentError("Could not access the TV library. Try again.") from exc
+        if not isinstance(result, dict) or result.get("error"):
+            raise TorrentError(
+                "Could not access that TV folder. Check its permissions and try again."
+            )
+        return result
+
+    def list_tv_folders(self, show: str | None = None) -> tuple[str, ...]:
+        result = self._tv_request("shows" if show is None else "seasons", show=show)
+        names = result.get("names")
+        if (
+            not isinstance(names, list)
+            or len(names) > 1000
+            or not all(valid_component(name) for name in names)
+        ):
+            raise TorrentError("The TV library returned invalid folder names.")
+        return tuple(names)
+
+    def prepare_tv_destination(self, show: str, season: str) -> str:
+        path = self.tv_destination(show, season)
+        if (
+            self._tv_request("prepare", show=show, season=season).get("ready")
+            is not True
+        ):
+            raise TorrentError("Could not prepare the TV destination.")
+        self.check_path(path)
+        return path
 
     @staticmethod
     def _validate_tag(tag: str) -> str:
@@ -516,7 +599,13 @@ class TorrentService:
             (item for item in self.locations.save_locations if item.path == save_path),
             None,
         )
-        return location.label if location is not None else "Custom"
+        if location is not None:
+            return location.label
+        for item in self.locations.save_locations:
+            if item.kind == "tv" and _within(save_path, item.path):
+                relative = PurePosixPath(save_path).relative_to(item.path)
+                return "TV / " + " / ".join(relative.parts)
+        return "Custom"
 
     @staticmethod
     def _multipart(fields: dict[str, str]) -> tuple[bytes, str]:
@@ -537,20 +626,26 @@ class TorrentService:
         return b"".join(chunks), boundary
 
     def submit(
-        self, magnet: Magnet, save_path: str, *, tracking_tag: str | None = None
+        self,
+        magnet: Magnet,
+        save_path: str,
+        *,
+        tracking_tag: str | None = None,
+        flat_layout: bool = False,
     ) -> None:
         self.check_path(save_path)
         tags = [self.tag]
         if tracking_tag is not None:
             tags.append(self._validate_tag(tracking_tag))
-        body, boundary = self._multipart(
-            {
-                "urls": magnet.value,
-                "savepath": save_path,
-                "tags": ",".join(tags),
-                "autoTMM": "false",
-            }
-        )
+        fields = {
+            "urls": magnet.value,
+            "savepath": save_path,
+            "tags": ",".join(tags),
+            "autoTMM": "false",
+        }
+        if flat_layout:
+            fields["contentLayout"] = "NoSubfolder"
+        body, boundary = self._multipart(fields)
         request = urllib.request.Request(
             self.base_url + "/api/v2/torrents/add",
             data=body,

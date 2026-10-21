@@ -8,6 +8,7 @@ torrent:
 
     - id: tv
       label: TV
+      kind: tv
       path: /mnt/raid1/jellyfin/media/tv
 
   custom_paths:
