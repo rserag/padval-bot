@@ -125,6 +125,11 @@ submitting immediately. Choose an existing show folder or **New show**, then
 choose an existing season or enter a season number (0 for specials). Lists
 are paginated, and Back and Cancel controls are available. New names are
 entered by replying to the bot's prompt; `/cancel` also works from a prompt.
+The two shows most recently used for successful TV submissions appear first,
+followed by the other shows in their usual order. These shortcuts survive bot
+restarts; removed show folders are omitted. Browsing or cancelling does not
+change the recent list. Only the two folder names are saved in the private
+runtime file `tv-recent-shows.json` (mode `0600`), without magnets or tracker URLs.
 The bot shows the full destination and waits for **Download** before creating
 any missing folders or submitting the magnet. An existing season folder is
 reused when its number matches, including older names such as
