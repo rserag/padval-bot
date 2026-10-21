@@ -120,6 +120,29 @@ memory and expire automatically. Common copied magnets with literal spaces in
 their display name are normalized automatically; matching single or double
 quotes around the complete magnet are also accepted.
 
+A save location with `kind: tv` opens a show and season picker instead of
+submitting immediately. Choose an existing show folder or **New show**, then
+choose an existing season or enter a season number (0 for specials). Lists
+are paginated, and Back and Cancel controls are available. New names are
+entered by replying to the bot's prompt; `/cancel` also works from a prompt.
+The bot shows the full destination and waits for **Download** before creating
+any missing folders or submitting the magnet. An existing season folder is
+reused when its number matches, including older names such as
+`Season 2 (BluRay)`; ambiguous matches require an explicit folder selection.
+
+TV submissions use qBittorrent's `NoSubfolder` content layout so an individual
+episode release does not add a torrent-name folder inside the selected season.
+Provide a magnet for the episode you want: this workflow does not select
+individual files from a season pack. Existing release folders are listed as
+they exist; the bot does not reorganize or rename existing media.
+
+Only one location may use `kind: tv`. Its path must remain under the configured
+allowed roots. The storage host lists real directories only and opens show and
+season directories without following symlinks. Folder creation uses the same
+unprivileged SSH account as the destination checks; that account must be the
+qBittorrent service account and have permission to create directories beneath
+the TV root. Movies and Custom retain their existing behavior.
+
 When tracking is enabled in the same YAML file, new bot-added torrents are
 watched automatically. `/downloads` shows progress, speed, ETA, state, and
 destination. Each download has a notification toggle, and the bot sends one

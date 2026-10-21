@@ -172,6 +172,7 @@ class TorrentTests(unittest.TestCase):
         self.assertIn(b"dn=Example%20Movie", request.data)
         self.assertIn(b"padval-bot", request.data)
         self.assertIn(b"padval-track-1234abcd", request.data)
+        self.assertNotIn(b"NoSubfolder", request.data)
         service.check_path.assert_called_once_with("/mnt/raid1/jellyfin/media/movies")
 
     def test_lists_tagged_torrent_progress(self):
