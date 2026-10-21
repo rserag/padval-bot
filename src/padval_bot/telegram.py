@@ -29,7 +29,7 @@ from .torrent import (
     TorrentSubmissionUncertain,
 )
 from .tracking import TrackingStateError, TrackingStore
-from .tv import TVSelection, season_name, valid_component
+from .tv import RecentTVShows, TVSelection, season_name, valid_component
 
 
 LOGGER = logging.getLogger(__name__)
@@ -75,6 +75,7 @@ class TelegramBot:
         self.clock = clock
         self.wall_clock = wall_clock
         self.pending_torrents: dict[int, PendingTorrent] = {}
+        self.recent_tv_shows = RecentTVShows(self.state_dir / "tv-recent-shows.json")
         self.tracking_store = (
             TrackingStore(
                 self.state_dir / "torrent-tracking.json",
@@ -494,6 +495,8 @@ class TelegramBot:
         options = self.torrent_service.list_tv_folders(
             None if is_shows else selection.show
         )
+        if is_shows:
+            options = self.recent_tv_shows.prioritize(options)
         page = max(0, min(page, max(0, (len(options) - 1) // 8)))
         nonce = secrets.token_hex(3)
 
@@ -522,6 +525,8 @@ class TelegramBot:
             if is_shows
             else f"Choose a season for <b>{html.escape(selection.show or '')}</b>."
         )
+        if is_shows and any(name in options for name in self.recent_tv_shows.names):
+            title += "\nRecently used shows appear first."
         if not options:
             title += "\nNo existing folders found."
         if len(options) > 8:
@@ -756,6 +761,8 @@ class TelegramBot:
         except TorrentError as exc:
             self.send(chat_id, "❌ " + html.escape(str(exc)))
             return
+        if flat_layout and pending.tv is not None and pending.tv.show is not None:
+            self.recent_tv_shows.remember(pending.tv.show)
         tracking = self._register_tracking(
             chat_id, pending, destination_label, tracking_tag
         )

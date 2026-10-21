@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 import re
+import tempfile
 import unicodedata
 from dataclasses import dataclass
+from pathlib import Path
 
 
 def valid_component(value: object) -> bool:
@@ -26,6 +31,53 @@ def season_name(value: str) -> str:
     if match is None:
         raise ValueError("Enter a season number from 0 to 999 (0 is Specials).")
     return f"Season {int(match[1]):02d}"
+
+
+class RecentTVShows:
+    """Keep only two unique show names, newest first, in private runtime state."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.names: tuple[str, ...] = ()
+        try:
+            with path.open("rb") as handle:
+                payload = json.loads(handle.read(4097))
+            if (
+                isinstance(payload, list)
+                and len(payload) <= 2
+                and all(valid_component(name) for name in payload)
+                and len(set(payload)) == len(payload)
+            ):
+                self.names = tuple(payload)
+        except (OSError, ValueError):
+            # Missing or damaged preferences must never prevent bot startup.
+            pass
+
+    def prioritize(self, options: tuple[str, ...]) -> tuple[str, ...]:
+        recent = tuple(name for name in self.names if name in options)
+        return recent + tuple(name for name in options if name not in recent)
+
+    def remember(self, show: str) -> None:
+        if not valid_component(show):
+            return
+        self.names = (show, *(name for name in self.names if name != show))[:2]
+        temporary = None
+        try:
+            descriptor, temporary = tempfile.mkstemp(
+                dir=self.path.parent, prefix=".tv-recent-"
+            )
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(self.names, handle)
+                handle.write("\n")
+            os.replace(temporary, self.path)
+        except OSError:
+            logging.getLogger(__name__).warning("Could not persist recent TV shows")
+        finally:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
 
 
 @dataclass(slots=True)

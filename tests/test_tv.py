@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -14,7 +15,7 @@ from padval_bot.torrent import (
     TorrentService,
     load_locations,
 )
-from padval_bot.tv import TV_STORAGE_SCRIPT, season_name, valid_component
+from padval_bot.tv import RecentTVShows, TV_STORAGE_SCRIPT, season_name, valid_component
 from test_torrent import LOCATIONS, Response
 
 
@@ -380,6 +381,81 @@ class TVWorkflowTests(unittest.TestCase):
         )
         with self.assertRaises(TorrentError):
             load_locations(str(path))
+
+    def test_recent_shows_are_first_after_successful_submissions_and_restart(self):
+        shows = ("ZZ Last Show", "YY Other Show")
+        for show in shows:
+            (self.tv / show / "Season 01").mkdir(parents=True)
+            self.message("/torrent magnet:?xt=urn:btih:" + "0" * 40)
+            self.click("TV")
+            self.click(show)
+            self.click("Season 01")
+            self.click("Download")
+        restarted = TelegramBot(self.bot.config, lambda: "ok", self.service)
+        self.assertEqual(restarted.recent_tv_shows.names, tuple(reversed(shows)))
+        self.message("/torrent magnet:?xt=urn:btih:" + "0" * 40)
+        self.click("TV")
+        options = self.bot.pending_torrents[42].tv.options
+        self.assertEqual(options[:2], tuple(reversed(shows)))
+        self.assertEqual(len(options), len(set(options)))
+        self.click(shows[0])
+        self.assertEqual(self.bot.pending_torrents[42].tv.show, shows[0])
+
+    def test_cancelled_or_failed_submission_does_not_change_recents(self):
+        self.choose_existing()
+        self.click("Cancel")
+        self.assertEqual(self.bot.recent_tv_shows.names, ())
+        self.message("/torrent magnet:?xt=urn:btih:" + "0" * 40)
+        self.click("TV")
+        self.choose_existing()
+        with mock.patch.object(
+            self.service, "submit", side_effect=TorrentError("Rejected")
+        ):
+            self.click("Download")
+        self.assertEqual(self.bot.recent_tv_shows.names, ())
+
+
+class RecentTVShowsTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.path = Path(self.directory.name) / "recent.json"
+
+    def test_remember_keeps_two_distinct_shows_newest_first(self):
+        store = RecentTVShows(self.path)
+        for show in ("A", "B", "C", "B"):
+            store.remember(show)
+        self.assertEqual(store.names, ("B", "C"))
+        self.assertEqual(RecentTVShows(self.path).names, ("B", "C"))
+        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(self.path.read_text()), ["B", "C"])
+
+    def test_missing_shows_are_omitted_and_other_order_preserved(self):
+        store = RecentTVShows(self.path)
+        store.remember("Deleted")
+        store.remember("Z")
+        self.assertEqual(store.prioritize(("A", "B", "Z")), ("Z", "A", "B"))
+
+    def test_invalid_state_is_ignored(self):
+        for content in (
+            "broken",
+            "{}",
+            '["../escape"]',
+            '["A", "A"]',
+            '["A", "B", "C"]',
+        ):
+            self.path.write_text(content)
+            self.assertEqual(RecentTVShows(self.path).names, ())
+
+    def test_failed_save_does_not_interrupt_download_or_corrupt_previous_state(self):
+        store = RecentTVShows(self.path)
+        store.remember("A")
+        with mock.patch("os.replace", side_effect=OSError("synthetic failure")):
+            with self.assertLogs("padval_bot.tv", level="WARNING"):
+                store.remember("B")
+        self.assertEqual(store.names, ("B", "A"))
+        self.assertEqual(RecentTVShows(self.path).names, ("A",))
+        self.assertEqual(list(self.path.parent.iterdir()), [self.path])
 
 
 class TVNameTests(unittest.TestCase):
