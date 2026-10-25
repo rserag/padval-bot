@@ -524,6 +524,8 @@ class TelegramBot:
             for index, name in enumerate(options)
             if page * 8 <= index < (page + 1) * 8
         ]
+        if not is_shows:
+            rows.insert(0, [button("All seasons / Complete show", "all")])
         navigation = []
         if page > 0:
             navigation.append(button("Previous", f"page{page - 1}"))
@@ -536,7 +538,7 @@ class TelegramBot:
         title = (
             "Choose a TV show folder, or create a new show."
             if is_shows
-            else f"Choose a season for <b>{html.escape(selection.show or '')}</b>."
+            else f"Choose a season or the complete show for <b>{html.escape(selection.show or '')}</b>."
         )
         if is_shows and any(name in options for name in self.recent_tv_shows.names):
             title += "\nRecently used shows appear first."
@@ -554,19 +556,34 @@ class TelegramBot:
         if (
             selection is None
             or selection.show is None
-            or selection.season is None
+            or (selection.season is None and not selection.complete_show)
             or self.torrent_service is None
         ):
             return
         path = self.torrent_service.tv_destination(selection.show, selection.season)
+        heading = (
+            "Confirm complete-show download"
+            if selection.complete_show
+            else "Confirm TV episode download"
+        )
+        scope = (
+            "All seasons / Complete show"
+            if selection.complete_show
+            else selection.season
+        )
+        note = (
+            "The show's folder will be created if needed. The torrent's season folders will be preserved inside it."
+            if selection.complete_show
+            else "Missing show and season folders will be created when you tap Download."
+        )
         nonce = secrets.token_hex(3)
         self.send(
             chat_id,
-            "<b>Confirm TV episode download</b>\n"
+            f"<b>{heading}</b>\n"
             f"Show: {html.escape(selection.show)}\n"
-            f"Season: {html.escape(selection.season)}\n"
+            f"Season: {html.escape(scope or '')}\n"
             f"Destination: <code>{html.escape(path)}</code>\n\n"
-            "Missing show and season folders will be created when you tap Download.",
+            f"{note}",
             reply_markup={
                 "inline_keyboard": [
                     [
@@ -632,9 +649,12 @@ class TelegramBot:
             else:
                 selection.stage = "seasons" if selection.stage == "confirm" else "shows"
                 selection.season = None
+                selection.complete_show = False
                 self._tv_options(chat_id, pending)
         elif action == "confirm" and selection.stage == "confirm":
-            if selection.show is None or selection.season is None:
+            if selection.show is None or (
+                selection.season is None and not selection.complete_show
+            ):
                 return
             path = self.torrent_service.prepare_tv_destination(
                 selection.show, selection.season
@@ -643,11 +663,21 @@ class TelegramBot:
                 chat_id,
                 pending,
                 path,
-                "TV / " + selection.show + " / " + selection.season,
+                "TV / "
+                + selection.show
+                + " / "
+                + (
+                    "All seasons" if selection.complete_show else selection.season or ""
+                ),
                 flat_layout=True,
             )
         elif selection.stage in {"shows", "seasons"}:
-            if action == "new":
+            if action == "all" and selection.stage == "seasons":
+                selection.season = None
+                selection.complete_show = True
+                self._tv_confirm(chat_id, pending)
+            elif action == "new":
+                selection.complete_show = False
                 selection.stage = (
                     "new_show" if selection.stage == "shows" else "new_season"
                 )
@@ -663,6 +693,7 @@ class TelegramBot:
                     selection.stage = "seasons"
                     self._tv_options(chat_id, pending)
                 else:
+                    selection.complete_show = False
                     selection.season = selection.options[index]
                     self._tv_confirm(chat_id, pending)
 
@@ -881,6 +912,7 @@ class TelegramBot:
         if (
             flat_layout
             and pending.tv is not None
+            and not pending.tv.complete_show
             and pending.tv.show is not None
             and pending.tv.season is not None
         ):
@@ -895,6 +927,8 @@ class TelegramBot:
                     }
                 ]
             )
+        elif pending.tv is not None and pending.tv.complete_show:
+            self.next_tv_episodes.pop(chat_id, None)
         if tracking:
             rows.append([{"text": "View downloads", "callback_data": "dl:list"}])
         self.send(
