@@ -148,6 +148,123 @@ class TVWorkflowTests(unittest.TestCase):
         self.assertTrue(destination.is_dir())
         self.assertEqual(self.urlopen.call_count, 1)
 
+    def test_complete_show_targets_show_root_and_preserves_season_contents(self):
+        episode_one = self.tv / self.show / "Season 01" / "Example.S01E01.mkv"
+        episode_one.write_bytes(b"existing episode")
+        episode_two = self.tv / self.show / "Season 02" / "Example.S02E01.mkv"
+        episode_two.parent.mkdir()
+        episode_two.write_bytes(b"another episode")
+        self.click(self.show)
+        self.click("All seasons / Complete show")
+        self.assertIn("Confirm complete-show download", self.sent_text()[-1])
+        self.assertIn(f"<code>{self.tv / self.show}</code>", self.sent_text()[-1])
+        self.urlopen.assert_not_called()
+        self.click("Download")
+        body = self.urlopen.call_args.args[0].data
+        self.assertIn(f"\r\n\r\n{self.tv / self.show}\r\n".encode(), body)
+        self.assertIn(b"NoSubfolder", body)
+        self.assertEqual(episode_one.read_bytes(), b"existing episode")
+        self.assertEqual(episode_two.read_bytes(), b"another episode")
+        self.assertEqual(self.bot.recent_tv_shows.names, (self.show,))
+        record = next(iter(self.bot.tracking_store.records.values()))
+        self.assertIn("All seasons", record.destination_label)
+        self.assertEqual(
+            self.service.destination_label(str(self.tv / self.show)),
+            "TV / " + self.show + " / All seasons",
+        )
+        self.assertNotIn(42, self.bot.next_tv_episodes)
+        self.assertFalse(
+            any(
+                button["text"] == "Add another episode"
+                for row in json.loads(self.calls[-1][1]["reply_markup"])[
+                    "inline_keyboard"
+                ]
+                for button in row
+            )
+        )
+
+    def test_new_complete_show_creates_no_artificial_season(self):
+        self.click("New show")
+        self.reply("Complete Show (2026)")
+        self.click("All seasons / Complete show")
+        destination = self.tv / "Complete Show (2026)"
+        self.assertFalse(destination.exists())
+        self.click("Download")
+        self.assertTrue(destination.is_dir())
+        self.assertEqual(list(destination.iterdir()), [])
+
+    def test_cancel_complete_show_creates_no_folder(self):
+        self.click("New show")
+        self.reply("Cancelled Complete Show")
+        self.click("All seasons / Complete show")
+        self.click("Cancel")
+        self.assertFalse((self.tv / "Cancelled Complete Show").exists())
+        self.urlopen.assert_not_called()
+
+    def test_change_complete_show_back_to_individual_season(self):
+        self.click(self.show)
+        self.click("All seasons / Complete show")
+        old_confirm = self.button("Download")
+        self.click("Change season")
+        self.callback(old_confirm)
+        self.urlopen.assert_not_called()
+        self.click("Season 01")
+        self.assertFalse(self.bot.pending_torrents[42].tv.complete_show)
+        self.click("Download")
+        self.assertIn(
+            str(self.tv / self.show / "Season 01").encode(),
+            self.urlopen.call_args.args[0].data,
+        )
+        self.assertIn(42, self.bot.next_tv_episodes)
+
+    def test_complete_show_confirmation_respects_authorization_and_expiry(self):
+        self.click(self.show)
+        self.click("All seasons / Complete show")
+        confirm = self.button("Download")
+        self.callback(confirm, chat_id=43)
+        self.now += 601
+        self.callback(confirm)
+        self.urlopen.assert_not_called()
+
+    def test_complete_show_storage_failure_retains_confirmation(self):
+        self.click(self.show)
+        self.click("All seasons / Complete show")
+        with mock.patch.object(
+            self.service,
+            "prepare_tv_destination",
+            side_effect=TorrentError("Unavailable"),
+        ):
+            self.click("Download")
+        self.assertTrue(self.bot.pending_torrents[42].tv.complete_show)
+        self.urlopen.assert_not_called()
+        self.click("Download")
+        self.assertEqual(self.urlopen.call_count, 1)
+
+    def test_complete_show_rejects_symlinks_traversal_and_empty_season(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.tv / "Linked Complete Show").symlink_to(outside, target_is_directory=True)
+        for show, season in (
+            ("Linked Complete Show", None),
+            ("../outside", None),
+            (self.show, ""),
+        ):
+            with self.assertRaises(TorrentError):
+                self.service.prepare_tv_destination(show, season)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_complete_show_invalidates_previous_episode_shortcut(self):
+        self.choose_existing()
+        self.click("Download")
+        shortcut = self.button("Add another episode")
+        self.message("/torrent magnet:?xt=urn:btih:" + "1" * 40)
+        self.click("TV")
+        self.click(self.show)
+        self.click("All seasons / Complete show")
+        self.click("Download")
+        self.callback(shortcut)
+        self.assertIn("Shortcut expired", self.calls[-1][1]["text"])
+
     def test_cancel_does_not_create_folders_or_submit(self):
         self.click("New show")
         self.reply("Cancelled Show")

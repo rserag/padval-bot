@@ -417,12 +417,15 @@ class TorrentService:
             raise TorrentError("TV show selection is not configured.")
         return location
 
-    def tv_destination(self, show: str, season: str) -> str:
-        if not valid_component(show) or not valid_component(season):
+    def tv_destination(self, show: str, season: str | None = None) -> str:
+        if not valid_component(show) or (
+            season is not None and not valid_component(season)
+        ):
             raise TorrentError(
                 "Use a folder name without slashes or control characters."
             )
-        return str(PurePosixPath(self.tv_location.path) / show / season)
+        path = PurePosixPath(self.tv_location.path) / show
+        return str(path / season if season is not None else path)
 
     def _tv_request(
         self, action: str, *, show: str | None = None, season: str | None = None
@@ -472,10 +475,14 @@ class TorrentService:
             raise TorrentError("The TV library returned invalid folder names.")
         return tuple(names)
 
-    def prepare_tv_destination(self, show: str, season: str) -> str:
+    def prepare_tv_destination(self, show: str, season: str | None = None) -> str:
         path = self.tv_destination(show, season)
         if (
-            self._tv_request("prepare", show=show, season=season).get("ready")
+            self._tv_request(
+                "prepare_show" if season is None else "prepare",
+                show=show,
+                season=season,
+            ).get("ready")
             is not True
         ):
             raise TorrentError("Could not prepare the TV destination.")
@@ -604,7 +611,8 @@ class TorrentService:
         for item in self.locations.save_locations:
             if item.kind == "tv" and _within(save_path, item.path):
                 relative = PurePosixPath(save_path).relative_to(item.path)
-                return "TV / " + " / ".join(relative.parts)
+                label = "TV / " + " / ".join(relative.parts)
+                return label + (" / All seasons" if len(relative.parts) == 1 else "")
         return "Custom"
 
     @staticmethod

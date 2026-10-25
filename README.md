@@ -122,7 +122,8 @@ quotes around the complete magnet are also accepted.
 
 A save location with `kind: tv` opens a show and season picker instead of
 submitting immediately. Choose an existing show folder or **New show**, then
-choose an existing season or enter a season number (0 for specials). Lists
+choose an existing season, enter a season number (0 for specials), or choose
+**All seasons / Complete show** for a torrent containing multiple seasons. Lists
 are paginated, and Back and Cancel controls are available. New names are
 entered by replying to the bot's prompt; `/cancel` also works from a prompt.
 The two shows most recently used for successful TV submissions appear first,
@@ -130,7 +131,7 @@ followed by the other shows in their usual order. These shortcuts survive bot
 restarts; removed show folders are omitted. Browsing or cancelling does not
 change the recent list. Only the two folder names are saved in the private
 runtime file `tv-recent-shows.json` (mode `0600`), without magnets or tracker URLs.
-After a successful TV submission, **Add another episode** asks for a new magnet
+After a successful episode submission, **Add another episode** asks for a new magnet
 and sends it directly to the same show and season, with no repeat selection or
 confirmation. The prompt displays the destination, validates the new magnet,
 and rechecks folder safety before each submission. Each successful episode
@@ -143,11 +144,19 @@ any missing folders or submitting the magnet. An existing season folder is
 reused when its number matches, including older names such as
 `Season 2 (BluRay)`; ambiguous matches require an explicit folder selection.
 
-TV submissions use qBittorrent's `NoSubfolder` content layout so an individual
-episode release does not add a torrent-name folder inside the selected season.
-Provide a magnet for the episode you want: this workflow does not select
-individual files from a season pack. Existing release folders are listed as
-they exist; the bot does not reorganize or rename existing media.
+Complete-show downloads target the selected show folder directly, without an
+artificial season directory. Confirmation shows **All seasons / Complete show**
+and the show destination. Only the show folder is created if missing. These
+downloads still support progress, completion notifications, recent-show
+shortcuts, and Jellyfin refreshes, but do not offer **Add another episode**
+because no individual season was selected.
+
+TV submissions use qBittorrent's `NoSubfolder` content layout to remove only
+the torrent's outer release folder. Folders inside that root, including all
+season folders, retain their hierarchy and names. The bot does not create a
+season structure for torrents that do not contain one, or select individual
+files from a pack. Existing release folders are listed as they exist; the bot
+does not reorganize or rename existing media.
 
 Only one location may use `kind: tv`. Its path must remain under the configured
 allowed roots. The storage host lists real directories only and opens show and

@@ -88,6 +88,7 @@ class TVSelection:
     options: tuple[str, ...] = ()
     nonce: str = ""
     prompt_message_id: int | None = None
+    complete_show: bool = False
 
 
 # Executed on the storage host. User text travels only through JSON stdin.
@@ -137,14 +138,14 @@ def main(request):
     if not any(os.path.commonpath([root, allowed]) == allowed for allowed in roots):
         raise ValueError()
     action = request["action"]
-    if action not in {"shows", "seasons", "prepare"}:
+    if action not in {"shows", "seasons", "prepare", "prepare_show"}:
         raise ValueError()
     root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         if action == "shows":
             return {"names": listing(root_fd)}
         try:
-            show_fd = directory(root_fd, request["show"], action == "prepare")
+            show_fd = directory(root_fd, request["show"], action in {"prepare", "prepare_show"})
         except FileNotFoundError:
             if action == "seasons":
                 return {"names": []}
@@ -152,6 +153,8 @@ def main(request):
         try:
             if action == "seasons":
                 return {"names": listing(show_fd, True)}
+            if action == "prepare_show":
+                return {"ready": True}
             season_fd = directory(show_fd, request["season"], True)
             os.close(season_fd)
             return {"ready": True}
