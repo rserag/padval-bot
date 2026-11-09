@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import Future, ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,7 @@ from typing import Any, Callable
 
 from .jellyfin import JellyfinError, JellyfinService, LibraryScanStatus
 from .scan_tracking import ScanTrackingStateError, ScanTrackingStore
+from .search import CATEGORIES, SearchError, SearchResult, SearchService
 from .torrent import (
     Magnet,
     TorrentError,
@@ -53,8 +55,21 @@ class NextTVEpisode:
     prompted_at: float = 0
 
 
+@dataclass(slots=True)
+class PendingSearch:
+    chat_id: int
+    request_id: str
+    created_at: float
+    query: str
+    category: str = ""
+    prompt_id: int | None = None
+    results: tuple[SearchResult, ...] = ()
+
+
 class TelegramBot:
     SCAN_POLL_INTERVAL_SECONDS = 10
+    SEARCH_TTL_SECONDS = 600
+    SEARCH_PAGE_SIZE = 5
 
     def __init__(
         self,
@@ -63,6 +78,7 @@ class TelegramBot:
         torrent_service: TorrentService | None = None,
         jellyfin_service: JellyfinService | None = None,
         *,
+        search_service: SearchService | None = None,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
     ) -> None:
@@ -81,6 +97,14 @@ class TelegramBot:
         )
         self.torrent_service = torrent_service
         self.jellyfin_service = jellyfin_service
+        self.search_service = search_service if torrent_service is not None else None
+        self.search_executor = (
+            ThreadPoolExecutor(max_workers=1) if self.search_service else None
+        )
+        self.pending_search: PendingSearch | None = None
+        self.search_job: (
+            tuple[PendingSearch, Future[tuple[SearchResult, ...] | Magnet]] | None
+        ) = None
         self.clock = clock
         self.wall_clock = wall_clock
         self.pending_torrents: dict[int, PendingTorrent] = {}
@@ -464,6 +488,11 @@ class TelegramBot:
         except TorrentError as exc:
             self.send(chat_id, html.escape(str(exc)))
             return
+        if self.pending_search and self.pending_search.chat_id == chat_id:
+            self.pending_search = None
+        self._offer_torrent(chat_id, magnet)
+
+    def _offer_torrent(self, chat_id: int, magnet: Magnet) -> None:
         request_id = secrets.token_hex(4)
         repeat = self.next_tv_episodes.get(chat_id)
         if repeat is not None:
@@ -476,6 +505,213 @@ class TelegramBot:
             "Where should this torrent be saved?",
             reply_markup=self._torrent_keyboard(request_id),
         )
+
+    def _current_search(self, chat_id: int) -> PendingSearch | None:
+        pending = self.pending_search
+        if pending is None or pending.chat_id != chat_id:
+            return None
+        if self.clock() - pending.created_at > self.SEARCH_TTL_SECONDS:
+            self.pending_search = None
+            return None
+        return pending
+
+    def _start_search(self, chat_id: int, query: str) -> None:
+        if self.search_service is None:
+            self.send(chat_id, "Torrent search is not configured.")
+            return
+        if self.search_job is not None:
+            self.send(
+                chat_id, "A search request is still finishing. Try again shortly."
+            )
+            return
+        query = " ".join(query.split())
+        if len(query) > 160:
+            self.send(chat_id, "Enter a title of at most 160 characters.")
+            return
+        pending = PendingSearch(chat_id, secrets.token_hex(4), self.clock(), query)
+        self.pending_search = pending
+        buttons = [
+            {"text": label, "callback_data": f"search:{pending.request_id}:{category}"}
+            for category, label in CATEGORIES.items()
+        ]
+        buttons.append(
+            {"text": "Cancel", "callback_data": f"search:{pending.request_id}:cancel"}
+        )
+        self.send(
+            chat_id,
+            "What would you like to search for?",
+            reply_markup={"inline_keyboard": [buttons[:2], buttons[2:]]},
+        )
+
+    def _queue_search(self, pending: PendingSearch) -> None:
+        if self.search_service is None or self.search_executor is None:
+            raise RuntimeError("Search is not configured")
+        self.search_job = (
+            pending,
+            self.search_executor.submit(
+                self.search_service.search, pending.category, pending.query
+            ),
+        )
+        self.send(
+            pending.chat_id, f"Searching for {CATEGORIES[pending.category].lower()}…"
+        )
+
+    def _search_reply(
+        self, message: dict[str, Any], chat: dict[str, Any], text: str
+    ) -> bool:
+        reply = message.get("reply_to_message")
+        if (
+            not isinstance(reply, dict)
+            or text.startswith("/")
+            or not self.authorize(chat, [])
+        ):
+            return False
+        pending = self._current_search(int(chat["id"]))
+        if (
+            pending is None
+            or pending.prompt_id is None
+            or reply.get("message_id") != pending.prompt_id
+        ):
+            return False
+        query = " ".join(text.split())
+        if not 1 <= len(query) <= 160:
+            self.send(
+                pending.chat_id, "Reply to the title prompt with 1–160 characters."
+            )
+            return True
+        pending.prompt_id = None
+        pending.query = query
+        self._queue_search(pending)
+        return True
+
+    def _search_view(
+        self, pending: PendingSearch, page: int
+    ) -> tuple[str, dict[str, Any]]:
+        start = page * self.SEARCH_PAGE_SIZE
+        stop = start + self.SEARCH_PAGE_SIZE
+        prefix = f"search:{pending.request_id}"
+        lines = [f"<b>{CATEGORIES[pending.category]} search</b>"]
+        rows = []
+        for index, result in enumerate(pending.results[start:stop], start=start):
+            title = html.escape(self._safe_torrent_name(result.title, 100))
+            source = html.escape(self._safe_torrent_name(result.source, 32))
+            size = self._format_bytes(result.size) if result.size else "Size unknown"
+            seeders = (
+                "Seeders unknown"
+                if result.seeders is None
+                else f"{result.seeders} seeders"
+            )
+            lines.append(
+                f"\n<b>{index + 1}. {title}</b>\n{size} · {seeders} · {source}"
+            )
+            rows.append(
+                {
+                    "text": str(index + 1),
+                    "callback_data": f"{prefix}:pick-{index}",
+                }
+            )
+        navigation = []
+        if page:
+            navigation.append(
+                {"text": "Previous", "callback_data": f"{prefix}:page-{page - 1}"}
+            )
+        if stop < len(pending.results):
+            navigation.append(
+                {"text": "Next", "callback_data": f"{prefix}:page-{page + 1}"}
+            )
+        navigation.append({"text": "Cancel", "callback_data": f"{prefix}:cancel"})
+        return "\n".join(lines), {"inline_keyboard": [rows, navigation]}
+
+    def _poll_search(self) -> None:
+        if self.search_job is None or not self.search_job[1].done():
+            return
+        pending, future = self.search_job
+        self.search_job = None
+        if self._current_search(pending.chat_id) is not pending:
+            return
+        try:
+            result = future.result()
+        except SearchError as exc:
+            if not pending.results:
+                self.pending_search = None
+            self.send(pending.chat_id, "❌ " + html.escape(str(exc)))
+            return
+        if isinstance(result, Magnet):
+            self.pending_search = None
+            self._offer_torrent(pending.chat_id, result)
+        elif result:
+            pending.results = result
+            text, keyboard = self._search_view(pending, 0)
+            self.send(pending.chat_id, text, reply_markup=keyboard)
+        else:
+            self.pending_search = None
+            self.send(
+                pending.chat_id, "No matching releases. Try another title with /search."
+            )
+
+    def _search_callback(
+        self, chat_id: int, callback_id: str, message: dict[str, Any], parts: list[str]
+    ) -> None:
+        pending = self._current_search(chat_id)
+        if (
+            pending is None
+            or pending.request_id != parts[1]
+            or self.search_service is None
+        ):
+            self.api(
+                "answerCallbackQuery",
+                callback_query_id=callback_id,
+                text="Search expired",
+            )
+            return
+        choice = parts[2]
+        if choice == "cancel":
+            self.pending_search = None
+            self.api(
+                "answerCallbackQuery",
+                callback_query_id=callback_id,
+                text="Search cancelled",
+            )
+            return
+        if self.search_job is not None:
+            self.api(
+                "answerCallbackQuery", callback_query_id=callback_id, text="Working…"
+            )
+            return
+        self.api("answerCallbackQuery", callback_query_id=callback_id)
+        if choice in CATEGORIES and not pending.category:
+            pending.category = choice
+            if pending.query:
+                self._queue_search(pending)
+            else:
+                pending.prompt_id = self.send(
+                    chat_id,
+                    f"Reply with a title to search for in {CATEGORIES[choice]}.",
+                    reply_markup={"force_reply": True},
+                )
+            return
+        action = re.fullmatch(r"(page|pick)-([0-9]{1,2})", choice)
+        if not action or not pending.results:
+            return
+        index = int(action[2])
+        if action[1] == "page":
+            message_id = message.get("message_id")
+            if isinstance(message_id, int) and index * self.SEARCH_PAGE_SIZE < len(
+                pending.results
+            ):
+                text, keyboard = self._search_view(pending, index)
+                self.edit(chat_id, message_id, text, reply_markup=keyboard)
+        elif index < len(pending.results):
+            result = pending.results[index]
+            if result.magnet is not None:
+                self.pending_search = None
+                self._offer_torrent(chat_id, result.magnet)
+            elif self.search_executor is not None:
+                self.search_job = (
+                    pending,
+                    self.search_executor.submit(self.search_service.resolve, result),
+                )
+                self.send(chat_id, "Getting the audiobook release…")
 
     def _register_tracking(
         self,
@@ -1278,6 +1514,9 @@ class TelegramBot:
             return
         chat_id = int(chat["id"])
         parts = data.split(":", 2)
+        if len(parts) == 3 and parts[0] == "search":
+            self._search_callback(chat_id, callback_id, message, parts)
+            return
         pending = self._expire_pending(chat_id)
         if (
             len(parts) != 3
@@ -1469,6 +1708,8 @@ class TelegramBot:
         chat = message.get("chat")
         if not isinstance(text, str) or not isinstance(chat, dict):
             return
+        if self._search_reply(message, chat, text.strip()):
+            return
         if self._handle_next_episode_reply(message, chat, text.strip()):
             return
         if self._handle_tv_reply(message, chat, text.strip()):
@@ -1479,7 +1720,9 @@ class TelegramBot:
             return
         command_text, separator, argument = text.strip().partition(" ")
         command = command_text.split("@", 1)[0].lower()
-        authorization_arguments = argument.split() if separator else []
+        authorization_arguments = (
+            argument.split() if separator and command != "/search" else []
+        )
         if not self.authorize(chat, authorization_arguments):
             return
         chat_id = int(chat["id"])
@@ -1493,6 +1736,8 @@ class TelegramBot:
                 )
         elif command == "/torrent":
             self._start_torrent(chat_id, argument if separator else "")
+        elif command == "/search":
+            self._start_search(chat_id, argument)
         elif command == "/downloads":
             if self.torrent_service is None:
                 self.send(chat_id, "Download tracking is not configured.")
@@ -1508,12 +1753,17 @@ class TelegramBot:
         elif command == "/scanstatus":
             self._scan_status(chat_id)
         elif command == "/cancel":
+            had_search = self._current_search(chat_id) is not None
+            if had_search:
+                self.pending_search = None
             repeat = self.next_tv_episodes.get(chat_id)
             had_repeat = repeat is not None and repeat.prompt_message_id is not None
             if repeat is not None:
                 repeat.prompt_message_id = None
             if self.pending_torrents.pop(chat_id, None) is not None or had_repeat:
                 self.send(chat_id, "Torrent request cancelled.")
+            elif had_search:
+                self.send(chat_id, "Search cancelled.")
             else:
                 self.send(chat_id, "There is no pending torrent request.")
         elif command in {"/start", "/help"}:
@@ -1523,6 +1773,8 @@ class TelegramBot:
                     "\nSend <code>/torrent &lt;magnet&gt;</code> to add a torrent."
                     "\nSend /downloads to view progress and notification settings."
                 )
+            if self.search_service is not None:
+                commands += "\nSend /search to find a movie, TV release, or audiobook."
             if self.jellyfin_service is not None:
                 commands += (
                     "\nSend /scan to start and follow a Jellyfin library scan."
@@ -1558,6 +1810,13 @@ class TelegramBot:
                     },
                 ]
             )
+        if self.search_service is not None:
+            commands.append(
+                {
+                    "command": "search",
+                    "description": "Search movies, TV, and audiobooks",
+                }
+            )
         commands.append({"command": "help", "description": "Show available commands"})
         return commands
 
@@ -1576,6 +1835,11 @@ class TelegramBot:
                 for chat_id in tuple(self.pending_torrents):
                     self._expire_pending(chat_id)
                 deadlines: list[float] = []
+                if self.pending_search is not None:
+                    self._current_search(self.pending_search.chat_id)
+                self._poll_search()
+                if self.search_job is not None:
+                    deadlines.append(self.clock() + 1)
                 if self.tracking_store is not None and self.torrent_service is not None:
                     now = self.clock()
                     if now >= next_tracking_poll:

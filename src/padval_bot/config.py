@@ -137,6 +137,23 @@ def load_config(path: str | Path) -> dict[str, Any]:
                         f"config.torrent.path_check_ssh.{key} must be an absolute path"
                     )
 
+    search = config.get("torrent_search")
+    if search is not None:
+        if not isinstance(search, dict):
+            raise ConfigError("config.torrent_search must be an object")
+        enabled = search.get("enabled", False)
+        if not isinstance(enabled, bool):
+            raise ConfigError("config.torrent_search.enabled must be bool")
+        if enabled:
+            if not isinstance(torrent, dict) or not torrent.get("enabled"):
+                raise ConfigError("torrent_search requires torrent submission")
+            _require(search, "jackett_base_url", str, "config.torrent_search")
+            config_file = _require(
+                search, "jackett_config_file", str, "config.torrent_search"
+            )
+            if not Path(config_file).is_absolute():
+                raise ConfigError("Jackett config file must be an absolute path")
+
     jellyfin = config.get("jellyfin")
     if jellyfin is not None:
         if not isinstance(jellyfin, dict):

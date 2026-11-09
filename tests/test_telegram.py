@@ -1,9 +1,11 @@
+import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
 
 from padval_bot.jellyfin import JellyfinError, LibraryScanStatus
+from padval_bot.search import SearchResult
 from padval_bot.telegram import TelegramBot
 from padval_bot.torrent import (
     Magnet,
@@ -84,6 +86,150 @@ class FakeJellyfinService:
         if self.refreshes:
             return LibraryScanStatus("Running", None, "Completed", "previous")
         return LibraryScanStatus("Idle", None, "Completed", "previous")
+
+
+class SearchChatTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        token = root / "token"
+        token.write_text("123456:ExampleTokenValue")
+        self.chat = {"id": 42, "type": "private"}
+        allowed = root / "chat"
+        allowed.write_text("42")
+        self.torrents = FakeTorrentService()
+        self.magnet = self.torrents.validate_magnet("magnet:?test")
+        self.queries = []
+        self.resolved = []
+        self.calls = []
+        self.now = 100.0
+
+        class FakeSearch:
+            def search(inner_self, category, query):
+                self.queries.append((category, query))
+                if category == "audiobooks":
+                    return (
+                        SearchResult(
+                            "Book <title>",
+                            400,
+                            None,
+                            "AudioBook Bay",
+                            jackett_path="path",
+                        ),
+                    )
+                return (
+                    SearchResult(
+                        "Movie <title>", 500, 4, "Torlock", magnet=self.magnet
+                    ),
+                )
+
+            def resolve(inner_self, result):
+                self.resolved.append(result)
+                return self.magnet
+
+        self.bot = TelegramBot(
+            {
+                "token_file": str(token),
+                "allowed_chat_id_file": str(allowed),
+                "state_dir": str(root / "state"),
+            },
+            lambda: "ok",
+            self.torrents,
+            search_service=FakeSearch(),
+            clock=lambda: self.now,
+        )
+        self.addCleanup(self.bot.search_executor.shutdown)
+
+        def api(method, **params):
+            self.calls.append((method, params))
+            return {"ok": True, "result": {"message_id": len(self.calls)}}
+
+        self.bot.api = api
+
+    def message(self, text, **kwargs):
+        self.bot.handle_update({"message": {"text": text, "chat": self.chat, **kwargs}})
+
+    def buttons(self):
+        params = next(
+            params for method, params in reversed(self.calls) if method == "sendMessage"
+        )
+        return [
+            button["callback_data"]
+            for row in json.loads(params["reply_markup"])["inline_keyboard"]
+            for button in row
+        ]
+
+    def click(self, data, chat=None):
+        self.bot.handle_update(
+            {
+                "callback_query": {
+                    "id": "callback",
+                    "data": data,
+                    "message": {"chat": chat or self.chat, "message_id": 200},
+                }
+            }
+        )
+
+    def finish(self):
+        self.bot.search_job[1].result(timeout=3)
+        self.bot._poll_search()
+
+    def test_search_result_uses_existing_picker_and_one_submission(self):
+        self.message("/search Movie <title>")
+        self.click(self.buttons()[0])
+        self.finish()
+        self.assertEqual(self.queries, [("movies", "Movie <title>")])
+        self.assertIn("Movie &lt;title&gt;", self.calls[-1][1]["text"])
+        pick = self.buttons()[0]
+        self.click(pick)
+        self.assertEqual(self.torrents.submissions, [])
+        destinations = self.buttons()
+        self.click(pick)
+        self.click(destinations[0])
+        self.click(destinations[0])
+        self.assertEqual(
+            self.torrents.submissions,
+            [(self.magnet.value, "/mnt/raid1/jellyfin/media/movies")],
+        )
+
+    def test_audiobook_uses_prompt_resolver_and_existing_subfolder_layout(self):
+        self.message("/search")
+        self.click(self.buttons()[2])
+        prompt = self.bot.pending_search.prompt_id
+        self.message("Unrelated text", reply_to_message={"message_id": prompt - 1})
+        self.assertIsNone(self.bot.search_job)
+        self.message("Book", reply_to_message={"message_id": prompt})
+        self.finish()
+        self.assertIn("Seeders unknown", self.calls[-1][1]["text"])
+        self.assertFalse(self.resolved)
+        self.click(self.buttons()[0])
+        self.finish()
+        self.assertEqual(len(self.resolved), 1)
+        self.click(self.buttons()[2])
+        self.assertEqual(
+            self.torrents.submissions[0][1], "/mnt/raid1/jellyfin/media/audiobooks"
+        )
+        self.assertTrue(self.torrents.create_subfolder)
+
+    def test_cancelled_or_expired_search_cannot_offer_download(self):
+        self.message("/search Film")
+        self.click(self.buttons()[0])
+        self.message("/cancel")
+        self.finish()
+        self.assertIsNone(self.bot.pending_search)
+        self.assertNotIn(42, self.bot.pending_torrents)
+        self.message("/search Film")
+        choice = self.buttons()[0]
+        self.now += self.bot.SEARCH_TTL_SECONDS + 1
+        self.click(choice)
+        self.assertEqual(self.calls[-1][1]["text"], "Search expired")
+        self.assertIsNone(self.bot.search_job)
+
+    def test_search_callback_requires_authorized_chat(self):
+        self.message("/search Film")
+        self.click(self.buttons()[0], chat={"id": 43, "type": "private"})
+        self.assertIsNone(self.bot.search_job)
 
 
 class TelegramAuthorizationTests(unittest.TestCase):
