@@ -8,6 +8,7 @@ from copy import deepcopy
 from .collector import collect_snapshot, render_report
 from .config import load_config
 from .jellyfin import JellyfinService
+from .search import SearchService
 from .telegram import TelegramBot
 from .torrent import TorrentService
 
@@ -53,6 +54,12 @@ def main() -> None:
         if isinstance(jellyfin_config, dict) and jellyfin_config.get("enabled")
         else None
     )
+    search_config = config.get("torrent_search")
+    search_service = (
+        SearchService(search_config)
+        if isinstance(search_config, dict) and search_config.get("enabled")
+        else None
+    )
 
     if arguments.check_torrent_paths:
         if torrent_service is None:
@@ -76,5 +83,9 @@ def main() -> None:
         print(build())
         return
     TelegramBot(
-        config["telegram"], build, torrent_service, jellyfin_service
+        config["telegram"],
+        build,
+        torrent_service,
+        jellyfin_service,
+        search_service=search_service,
     ).run_forever()

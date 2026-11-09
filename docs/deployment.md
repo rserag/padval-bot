@@ -113,3 +113,17 @@ SSH private key as the `PADVAL_DEPLOY_SSH_KEY` production environment secret.
 The deploy workflow sends the exact tested revision, performs live destination
 preflight checks, waits for a fresh Telegram polling heartbeat, and restores
 the prior release if the candidate does not become healthy.
+
+## Enable torrent search
+
+Keep Jackett on the bot's host with its API and administration UI bound to
+loopback. Add the AudioBook Bay indexer in Jackett and verify that its search
+and magnet resolution work. Restrict the Jackett configuration directory to
+the service account. The bot reads the API key directly from Jackett's
+protected `ServerConfig.json`.
+
+Set `torrent_search.enabled` in the private bot configuration and set
+`jackett_base_url` to the local HTTP origin and `jackett_config_file` to the
+absolute path of `ServerConfig.json`. Enable torrent submission as well. The
+bot accesses Torlock and Knaben over HTTPS. Run `--check-config` before
+restarting the bot.

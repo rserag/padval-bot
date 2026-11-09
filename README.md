@@ -10,6 +10,11 @@ For an MP3 audiobook, send `/torrent <magnet>` and choose **Audiobooks**.
 qBittorrent keeps each torrent in its own folder. With Jellyfin refresh
 enabled, the bot requests a library scan when the tracked download completes.
 
+With torrent search enabled, send `/search` and choose Movies, TV, or
+Audiobooks. You can also include the title with `/search <title>`. The bot
+lists releases with their size, source, and reported seeders. Pick a release
+to open the same destination menu used by `/torrent`.
+
 It uses Python, PyYAML, and common Linux tools. Grafana can
 continue sending alerts with the same Telegram bot token; Padval Bot only
 consumes incoming commands.
@@ -84,7 +89,7 @@ For a persistent installation, follow [docs/deployment.md](docs/deployment.md).
 
 ## Configuration
 
-The JSON file has seven main areas:
+The JSON file has these main areas:
 
 - `telegram`: token, authorized-chat, pairing-secret, and runtime-state files.
 - `network_checks`: ICMP, TCP, or DNS checks.
@@ -95,6 +100,8 @@ The JSON file has seven main areas:
 - `http_checks`: endpoint-specific healthy HTTP status ranges and timeouts.
 - `torrent`: optional private qBittorrent endpoint and SSH path-check settings.
   Public destination choices live in `config/torrent-locations.yaml`.
+- `torrent_search`: optional search through Torlock for movies, Knaben for TV,
+  and a local Jackett instance configured with AudioBook Bay for audiobooks.
 - `jellyfin`: optional private Jellyfin endpoint and API-key file. The key is
   read from a protected file and is never placed in Git or a URL.
 
