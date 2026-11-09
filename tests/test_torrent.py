@@ -22,6 +22,10 @@ torrent:
     - id: tv
       label: TV
       path: /mnt/raid1/jellyfin/media/tv
+    - id: audiobooks
+      label: Audiobooks
+      path: /mnt/raid1/jellyfin/media/audiobooks
+      create_subfolder: true
   custom_paths:
     enabled: true
     allowed_roots:
@@ -89,8 +93,11 @@ class TorrentTests(unittest.TestCase):
     def test_loads_locations_and_custom_policy(self):
         locations = load_locations(str(self.locations_path))
         self.assertEqual(
-            [item.id for item in locations.save_locations], ["movies", "tv"]
+            [item.id for item in locations.save_locations],
+            ["movies", "tv", "audiobooks"],
         )
+        self.assertFalse(locations.by_id("movies").create_subfolder)
+        self.assertTrue(locations.by_id("audiobooks").create_subfolder)
         self.assertEqual(locations.allowed_roots, ("/mnt/raid1/jellyfin/media",))
         self.assertEqual(locations.pending_ttl_seconds, 600)
         self.assertTrue(locations.tracking.enabled)
@@ -174,6 +181,23 @@ class TorrentTests(unittest.TestCase):
         self.assertIn(b"padval-track-1234abcd", request.data)
         self.assertNotIn(b"NoSubfolder", request.data)
         service.check_path.assert_called_once_with("/mnt/raid1/jellyfin/media/movies")
+
+    def test_submit_can_require_a_subfolder_for_an_audiobook(self):
+        service = self.service()
+        service.check_path = mock.Mock()
+        magnet = validate_magnet(
+            "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
+        )
+        with mock.patch("urllib.request.urlopen", return_value=Response()) as urlopen:
+            service.submit(
+                magnet,
+                "/mnt/raid1/jellyfin/media/audiobooks",
+                create_subfolder=True,
+            )
+        self.assertIn(
+            b'name="contentLayout"\r\n\r\nSubfolder\r\n',
+            urlopen.call_args.args[0].data,
+        )
 
     def test_lists_tagged_torrent_progress(self):
         service = self.service()

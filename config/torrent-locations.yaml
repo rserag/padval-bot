@@ -11,6 +11,11 @@ torrent:
       kind: tv
       path: /mnt/raid1/jellyfin/media/tv
 
+    - id: audiobooks
+      label: Audiobooks
+      path: /mnt/raid1/jellyfin/media/audiobooks
+      create_subfolder: true
+
   custom_paths:
     enabled: true
     allowed_roots:

@@ -866,6 +866,7 @@ class TelegramBot:
         destination_label: str,
         *,
         flat_layout: bool = False,
+        create_subfolder: bool = False,
     ) -> None:
         if self.torrent_service is None:
             raise RuntimeError("torrent service is unavailable")
@@ -886,6 +887,8 @@ class TelegramBot:
                 options["tracking_tag"] = tracking_tag
             if flat_layout:
                 options["flat_layout"] = True
+            elif create_subfolder:
+                options["create_subfolder"] = True
             self.torrent_service.submit(pending.magnet, save_path, **options)
         except TorrentSubmissionUncertain as exc:
             tracking = self._register_tracking(
@@ -1353,7 +1356,13 @@ class TelegramBot:
             else:
                 pending.custom_prompt_message_id = None
             return
-        self._submit_torrent(chat_id, pending, location.path, location.label)
+        self._submit_torrent(
+            chat_id,
+            pending,
+            location.path,
+            location.label,
+            create_subfolder=location.create_subfolder,
+        )
 
     def _handle_custom_path(
         self, message: dict[str, Any], chat: dict[str, Any], text: str

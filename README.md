@@ -6,6 +6,10 @@ Status returns one compact infrastructure summary. Torrent submission accepts
 one magnet link, asks for a configured destination, and submits it to
 qBittorrent without exposing the magnet in replies or logs.
 
+For an MP3 audiobook, send `/torrent <magnet>` and choose **Audiobooks**.
+qBittorrent keeps each torrent in its own folder. With Jellyfin refresh
+enabled, the bot requests a library scan when the tracked download completes.
+
 It uses Python, PyYAML, and common Linux tools. Grafana can
 continue sending alerts with the same Telegram bot token; Padval Bot only
 consumes incoming commands.
