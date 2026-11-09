@@ -34,6 +34,7 @@ class SaveLocation:
     label: str
     path: str
     kind: str = "directory"
+    create_subfolder: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,7 +188,16 @@ def load_locations(path: str) -> TorrentLocations:
             raise TorrentError("save location kind must be directory or tv")
         if kind == "tv" and any(item.kind == "tv" for item in locations):
             raise TorrentError("only one TV location may be configured")
-        locations.append(SaveLocation(location_id, label, location_path, kind))
+        create_subfolder = row.get("create_subfolder", False)
+        if not isinstance(create_subfolder, bool) or (
+            create_subfolder and kind == "tv"
+        ):
+            raise TorrentError(
+                "create_subfolder must be a boolean for directory presets"
+            )
+        locations.append(
+            SaveLocation(location_id, label, location_path, kind, create_subfolder)
+        )
 
     ttl = torrent.get("pending_request_ttl_seconds", 600)
     if not isinstance(ttl, int) or not 60 <= ttl <= 3600:
@@ -640,6 +650,7 @@ class TorrentService:
         *,
         tracking_tag: str | None = None,
         flat_layout: bool = False,
+        create_subfolder: bool = False,
     ) -> None:
         self.check_path(save_path)
         tags = [self.tag]
@@ -653,6 +664,8 @@ class TorrentService:
         }
         if flat_layout:
             fields["contentLayout"] = "NoSubfolder"
+        elif create_subfolder:
+            fields["contentLayout"] = "Subfolder"
         body, boundary = self._multipart(fields)
         request = urllib.request.Request(
             self.base_url + "/api/v2/torrents/add",

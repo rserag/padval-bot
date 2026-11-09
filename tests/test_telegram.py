@@ -21,6 +21,12 @@ class FakeTorrentService:
             (
                 SaveLocation("movies", "Movies", "/mnt/raid1/jellyfin/media/movies"),
                 SaveLocation("tv", "TV", "/mnt/raid1/jellyfin/media/tv"),
+                SaveLocation(
+                    "audiobooks",
+                    "Audiobooks",
+                    "/mnt/raid1/jellyfin/media/audiobooks",
+                    create_subfolder=True,
+                ),
             ),
             True,
             ("/mnt/raid1/jellyfin/media",),
@@ -45,9 +51,10 @@ class FakeTorrentService:
             raise ValueError("outside")
         return value
 
-    def submit(self, magnet, path, *, tracking_tag=None):
+    def submit(self, magnet, path, *, tracking_tag=None, create_subfolder=False):
         self.submissions.append((magnet.value, path))
         self.tracking_tag = tracking_tag
+        self.create_subfolder = create_subfolder
 
     def list_torrents(self, *, tag=None, hashes=()):
         del tag, hashes
@@ -360,6 +367,7 @@ class TelegramAuthorizationTests(unittest.TestCase):
         self.assertNotIn("private-passkey", send[1]["text"])
         self.assertNotIn("private-passkey", send[1]["reply_markup"])
         self.assertIn("Movies", send[1]["reply_markup"])
+        self.assertIn("Audiobooks", send[1]["reply_markup"])
         self.assertIn("Custom", send[1]["reply_markup"])
 
     def test_preset_callback_submits_selected_path(self):
@@ -370,30 +378,34 @@ class TelegramAuthorizationTests(unittest.TestCase):
             "ok": True,
             "result": {"message_id": 10},
         }
-        bot.handle_update(
-            {
-                "message": {
-                    "message_id": 1,
-                    "text": "/torrent magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
-                    "chat": {"id": 42, "type": "private"},
-                }
-            }
-        )
-        pending = bot.pending_torrents[42]
-        bot.handle_update(
-            {
-                "callback_query": {
-                    "id": "callback-1",
-                    "data": f"torrent:{pending.request_id}:movies",
-                    "message": {"chat": {"id": 42, "type": "private"}},
-                }
-            }
-        )
-        self.assertEqual(
-            service.submissions[0][1],
-            "/mnt/raid1/jellyfin/media/movies",
-        )
-        self.assertNotIn(42, bot.pending_torrents)
+        chat = {"id": 42, "type": "private"}
+        for choice in ("movies", "audiobooks"):
+            with self.subTest(choice=choice):
+                bot.handle_update(
+                    {
+                        "message": {
+                            "message_id": 1,
+                            "text": "/torrent magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+                            "chat": chat,
+                        }
+                    }
+                )
+                pending = bot.pending_torrents[42]
+                bot.handle_update(
+                    {
+                        "callback_query": {
+                            "id": "callback-1",
+                            "data": f"torrent:{pending.request_id}:{choice}",
+                            "message": {"chat": chat},
+                        }
+                    }
+                )
+                self.assertEqual(
+                    service.submissions[-1][1],
+                    f"/mnt/raid1/jellyfin/media/{choice}",
+                )
+                self.assertEqual(service.create_subfolder, choice == "audiobooks")
+                self.assertNotIn(42, bot.pending_torrents)
 
     def test_custom_path_must_reply_to_force_reply_prompt(self):
         self.chat.write_text("42\n", encoding="ascii")
